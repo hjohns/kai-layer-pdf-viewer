@@ -1,12 +1,60 @@
 import { ref, computed } from 'vue';
 import type { DocAnnotation } from '@/workers/mupdf.worker';
 
+// Re-export DocAnnotation for external use
+export type { DocAnnotation };
+
+// Custom annotation provider interfaces
+export interface AnnotationRenderContext {
+  ctx: CanvasRenderingContext2D;
+  annotation: DocAnnotation;
+  effectiveDpi: number;
+  pageNumber: number;
+  rect: {
+    minX: number;
+    maxX: number;
+    minY: number;
+    maxY: number;
+    width: number;
+    height: number;
+  };
+}
+
+export interface AnnotationProvider {
+  id: string;
+  name: string;
+  description?: string;
+  canHandle: (annotation: DocAnnotation) => boolean;
+  render: (context: AnnotationRenderContext) => void;
+  priority?: number; // Higher numbers = higher priority
+}
+
+export interface AnnotationProviderOptions {
+  id: string;
+  name: string;
+  description?: string;
+  canHandle: (annotation: DocAnnotation) => boolean;
+  render: (context: AnnotationRenderContext) => void;
+  priority?: number;
+}
+
 export function usePdfAnnotations() {
   // State
   const pageAnnotations = ref<DocAnnotation[]>([]);
   const selectedAnnotation = ref<DocAnnotation | null>(null);
   const annotationPaths = ref(new Map<string, { path: Path2D, annotation: DocAnnotation }>());
   const showDialog = ref(false);
+  
+  // Custom annotation providers
+  const annotationProviders = ref<Map<string, AnnotationProvider>>(new Map());
+  const defaultProvider: AnnotationProvider = {
+    id: 'default',
+    name: 'Default Text Renderer',
+    description: 'Built-in text rendering for annotations',
+    canHandle: () => true, // Default provider handles all annotations
+    priority: 0,
+    render: () => {} // Will be set later
+  };
   
   // Text styling configuration
   const textStyle = ref({
@@ -156,46 +204,49 @@ export function usePdfAnnotations() {
     return height > width * 1.2; // If height is 1.2x greater than width (more lenient)
   };
 
-  // Draw annotation text inside rectangle
-  const drawAnnotationText = (
-    ctx: CanvasRenderingContext2D, 
-    annotation: DocAnnotation, 
-    effectiveDpi: number
-  ) => {
+  // Set up the default provider with the built-in text rendering
+  const setupDefaultProvider = () => {
+    defaultProvider.render = (context: AnnotationRenderContext) => {
+      drawDefaultAnnotationText(context);
+    };
+  };
+
+  // Default annotation text rendering (extracted from original function)
+  const drawDefaultAnnotationText = (context: AnnotationRenderContext) => {
+    const { ctx, annotation, effectiveDpi } = context;
+    const { minX, maxX, minY, maxY, width, height } = context.rect;
+    
     if (!annotation.content || !annotation.content.trim()) return;
     
-    const points = convertCoordinates(annotation.rect, effectiveDpi);
-    if (points.length < 3) return;
-    
-    // Calculate bounding box
-    const minX = Math.min(...points.map(p => p[0]));
-    const maxX = Math.max(...points.map(p => p[0]));
-    const minY = Math.min(...points.map(p => p[1]));
-    const maxY = Math.max(...points.map(p => p[1]));
-    
-    const width = maxX - minX;
-    const height = maxY - minY;
-    
-    // More lenient size requirements - only skip if extremely small
-    const isVertical = isVerticalOrientation(width, height);
-    const absoluteMinWidth = 8;  // Very small minimum
-    const absoluteMinHeight = 6; // Very small minimum
-    
-    if (width < absoluteMinWidth || height < absoluteMinHeight) {
-      console.log('Skipping annotation - too small:', { width, height, absoluteMinWidth, absoluteMinHeight, isVertical });
+    // Only skip if the rectangle is completely invalid (negative or zero dimensions)
+    if (width <= 0 || height <= 0) {
+      console.log('Skipping annotation - invalid dimensions:', { width, height });
       return;
     }
     
+    // Never skip annotations that have content - always show text overlay
+    const isVertical = isVerticalOrientation(width, height);
+    
     ctx.save();
     
-    // Set text styling - use smaller font for very small rectangles
+    // Set text styling - scale font size based on rectangle size
     const baseFontSize = textStyle.value.fontSize;
-    const fontSize = (width < 20 || height < 12) ? Math.max(8, baseFontSize * 0.8) : baseFontSize;
+    let fontSize = baseFontSize;
+    
+    // Scale font size down for very small rectangles
+    if (width < 15 || height < 10) {
+      fontSize = Math.max(6, baseFontSize * 0.6); // Minimum 6px font
+    } else if (width < 25 || height < 15) {
+      fontSize = Math.max(8, baseFontSize * 0.7); // Minimum 8px font
+    }
+    
     ctx.font = `${fontSize}px ${textStyle.value.fontFamily}`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     
-    const padding = textStyle.value.padding;
+    // Adjust padding based on rectangle size
+    const basePadding = textStyle.value.padding;
+    const padding = (width < 20 || height < 12) ? Math.max(2, basePadding * 0.5) : basePadding;
     const lineHeight = fontSize * textStyle.value.lineHeight;
     
     // Debug logging
@@ -211,9 +262,9 @@ export function usePdfAnnotations() {
     let textWidth: number;
     let textHeight: number;
     
-    if (isVertical && width >= 12 && height >= 16) {
+    if (isVertical && width >= 8 && height >= 12) {
       // For vertical orientation, treat each character as a line
-      // Only use vertical if rectangle is tall enough to accommodate it
+      // Use vertical if rectangle is tall and has minimum width
       lines = annotation.content.split('').filter(char => char.trim());
       textWidth = fontSize; // Character width
       textHeight = lines.length * lineHeight;
@@ -269,6 +320,60 @@ export function usePdfAnnotations() {
     
     ctx.restore();
   };
+
+  // New provider-based annotation text rendering
+  const drawAnnotationText = (
+    ctx: CanvasRenderingContext2D, 
+    annotation: DocAnnotation, 
+    effectiveDpi: number,
+    pageNumber: number = 0
+  ) => {
+    if (!annotation.content || !annotation.content.trim()) return;
+    
+    // Calculate rectangle bounds
+    const points = convertCoordinates(annotation.rect, effectiveDpi);
+    if (points.length < 3) return;
+    
+    const minX = Math.min(...points.map(p => p[0]));
+    const maxX = Math.max(...points.map(p => p[0]));
+    const minY = Math.min(...points.map(p => p[1]));
+    const maxY = Math.max(...points.map(p => p[1]));
+    
+    const width = maxX - minX;
+    const height = maxY - minY;
+    
+    // Only skip if the rectangle is completely invalid
+    if (width <= 0 || height <= 0) return;
+    
+    // Create render context
+    const context: AnnotationRenderContext = {
+      ctx,
+      annotation,
+      effectiveDpi,
+      pageNumber,
+      rect: { minX, maxX, minY, maxY, width, height }
+    };
+    
+    // Find the appropriate provider for this annotation
+    const provider = findProviderForAnnotation(annotation);
+    
+    try {
+      provider.render(context);
+    } catch (error) {
+      console.warn(`Error rendering annotation with provider ${provider.id}:`, error);
+      // Fallback to default provider if custom provider fails
+      if (provider.id !== 'default') {
+        try {
+          defaultProvider.render(context);
+        } catch (fallbackError) {
+          console.error('Default provider also failed:', fallbackError);
+        }
+      }
+    }
+  };
+
+  // Initialize the default provider
+  setupDefaultProvider();
 
   // Draw hover effect
   const drawHoverEffect = (ctx: CanvasRenderingContext2D, x: number, y: number, effectiveDpi: number) => {
@@ -329,6 +434,56 @@ export function usePdfAnnotations() {
     };
   };
 
+  // Custom annotation provider management
+  const registerAnnotationProvider = (options: AnnotationProviderOptions) => {
+    const provider: AnnotationProvider = {
+      id: options.id,
+      name: options.name,
+      description: options.description,
+      canHandle: options.canHandle,
+      render: options.render,
+      priority: options.priority || 0
+    };
+    
+    annotationProviders.value.set(provider.id, provider);
+    console.log(`Registered annotation provider: ${provider.name} (${provider.id})`);
+  };
+
+  const unregisterAnnotationProvider = (id: string) => {
+    if (id === 'default') {
+      console.warn('Cannot unregister the default annotation provider');
+      return;
+    }
+    
+    const removed = annotationProviders.value.delete(id);
+    if (removed) {
+      console.log(`Unregistered annotation provider: ${id}`);
+    } else {
+      console.warn(`Annotation provider not found: ${id}`);
+    }
+  };
+
+  const getAnnotationProvider = (id: string): AnnotationProvider | undefined => {
+    return annotationProviders.value.get(id);
+  };
+
+  const getAllProviders = (): AnnotationProvider[] => {
+    return Array.from(annotationProviders.value.values()).sort((a, b) => (b.priority || 0) - (a.priority || 0));
+  };
+
+  const findProviderForAnnotation = (annotation: DocAnnotation): AnnotationProvider => {
+    const providers = getAllProviders();
+    
+    for (const provider of providers) {
+      if (provider.canHandle(annotation)) {
+        return provider;
+      }
+    }
+    
+    // Fallback to default provider
+    return defaultProvider;
+  };
+
   // Computed
   const selectedAnnotationContent = computed(() => selectedAnnotation.value?.content || '');
 
@@ -355,6 +510,13 @@ export function usePdfAnnotations() {
     closeDialog,
     updateTextStyle,
     resetTextStyle,
+    
+    // Custom annotation provider methods
+    registerAnnotationProvider,
+    unregisterAnnotationProvider,
+    getAnnotationProvider,
+    getAllProviders,
+    findProviderForAnnotation,
     
     // Computed
     selectedAnnotationContent
