@@ -1,6 +1,6 @@
 export default defineAppConfig({
     // nav menu, name substitutions, breadcrumbs prepend & pagination config goes here
-    menu: () => []
+    menu: ()=> [],
 });
 
 declare module '@nuxt/schema' {

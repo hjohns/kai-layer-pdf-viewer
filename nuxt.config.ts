@@ -16,5 +16,5 @@ export default defineNuxtConfig({
             include: ["@triply/yasgui"],
             exclude: ['mupdf']
         }
-    },
+    }
 });
