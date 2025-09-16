@@ -15,7 +15,7 @@
               <Button 
                 variant="ghost" 
                 size="icon"
-                :disabled="currentPage <= 0"
+                :disabled="!canGoPrev"
                 @click="prevPage"
               >
                 <LucideChevronLeft class="h-4 w-4" />
@@ -32,7 +32,7 @@
               <Button 
                 variant="ghost" 
                 size="icon"
-                :disabled="currentPage >= totalPages - 1"
+                :disabled="!canGoNext"
                 @click="nextPage"
               >
                 <LucideChevronRight class="h-4 w-4" />
@@ -46,7 +46,7 @@
               <Button variant="ghost" size="icon" @click="zoomOut">
                 <LucideZoomOut class="h-4 w-4" />
               </Button>
-              <span class="text-sm">{{ Math.round(zoom * 100) }}%</span>
+              <span class="text-sm">{{ zoomPercentage }}%</span>
               <Button variant="ghost" size="icon" @click="zoomIn">
                 <LucideZoomIn class="h-4 w-4" />
               </Button>
@@ -81,16 +81,16 @@
             <DialogTitle>Annotation Details</DialogTitle>
           </DialogHeader>
           <div v-if="selectedAnnotation">
-            <p class="text-lg">{{ selectedAnnotation.content }}</p>
+            <p class="text-lg">{{ selectedAnnotationContent }}</p>
           </div>
           <div>
             
           </div>
           <div class="flex justify-end gap-2 mt-4">
-            <Button @click="showDialog = false">
+            <Button @click="closeDialog">
               Approve
             </Button>
-            <Button variant="secondary" @click="showDialog = false">
+            <Button variant="secondary" @click="closeDialog">
               Reject
             </Button>
           </div>
@@ -100,328 +100,46 @@
   </template>
   
   <script setup lang="ts">
-  import { ref, watch, onMounted, onBeforeUnmount } from "vue";
-  import { DateTime } from 'luxon'
-  import { Dialog, DialogContent, DialogHeader, DialogTitle } from '#components';
-  import type { DocAnnotation } from '@/workers/mupdf.worker';
-  
-  const runtime = useRuntimeConfig();
+  import { watch, onMounted, onBeforeUnmount } from "vue";  
   
   const props = defineProps<{ documentId: string | null, file: string }>();
   
-  const { workerInitialized, loadDocument, renderPage, getPageCount, getMetadata } = useMuPdf();
-  const canvasRef = ref<HTMLCanvasElement | null>(null);
-  const pdfDocument = ref<any | null>(null);
-  const currentPage = ref(0);
-  const totalPages = ref(0);
-  const zoom = ref(1);
-  const isLoading = ref(false);
-  const error = ref<string | null>(null);
-  const pageUrls = ref<string[]>([]);
-  const showDialog = ref(false);
-  const selectedAnnotation = ref<{ rect: [number, number, number, number], content: string } | null>(null);
-  const pageAnnotations = ref<Array<DocAnnotation>>([]);
-  const annotationPaths = ref(new Map<string, { path: Path2D, annotation: DocAnnotation }>());
-  const overlayCanvasRef = ref<HTMLCanvasElement | null>(null);
-  
-  const formatPdfDate = (dateStr: string) => {
-    if (!dateStr) return '';
-    try {
-      const cleaned = dateStr.replace(/^D:/, '').replace(/'.*$/, '');
-      return DateTime.fromFormat(cleaned, "yyyyMMddHHmmssZ")
-        .setZone('local')
-        .toLocaleString(DateTime.DATETIME_MED);
-    } catch {
-      return dateStr;
-    }
-  };
-  
-  const metadata = ref({ format: '', modDate: '', author: '' });
-  const annotations = ref<string[]>([]);
-  
-  const cleanup = () => {
-    console.log("Cleaning up PDF resources");
-    pdfDocument.value = null;
-    totalPages.value = 0;
-    metadata.value = { format: '', modDate: '', author: '' };
-    annotations.value = [];
+  const { 
+    // State
+    pdfDocument,
+    currentPage,
+    totalPages,
+    isLoading,
+    error,
+    metadata,
+    workerInitialized,
+    canvasRef,
+    overlayCanvasRef,
     
-    // Cleanup page URLs
-    pageUrls.value.forEach(url => URL.revokeObjectURL(url));
-    pageUrls.value = [];
+    // Annotation state
+    selectedAnnotation,
+    showDialog,
+    selectedAnnotationContent,
     
-    // Clear annotation paths
-    annotationPaths.value.clear();
+    // Methods
+    loadPdf,
+    displayPage,
+    goToPage,
+    nextPage,
+    prevPage,
+    zoomIn,
+    zoomOut,
+    handleCanvasClick,
+    handleCanvasMouseMove,
+    cleanup,
+    closeDialog,
     
-    // Clear overlay canvas if it exists
-    if (overlayCanvasRef.value) {
-      const ctx = overlayCanvasRef.value.getContext('2d');
-      if (ctx) {
-        ctx.clearRect(0, 0, overlayCanvasRef.value.width, overlayCanvasRef.value.height);
-      }
-    }
-  };
+    // Computed
+    canGoNext,
+    canGoPrev,
+    zoomPercentage
+  } = usePdf();
   
-  const clearAnnotations = () => {
-    // Clear annotation paths
-    annotationPaths.value.clear();
-    
-    // Clear overlay canvas
-    if (overlayCanvasRef.value) {
-      const ctx = overlayCanvasRef.value.getContext('2d');
-      if (ctx) {
-        ctx.clearRect(0, 0, overlayCanvasRef.value.width, overlayCanvasRef.value.height);
-      }
-    }
-  };
-  
-  const loadPageAnnotations = async (pageNumber: number) => {
-    //const page = await pdfDocument.value?.loadPage(pageNumber);
-    // try {
-    //   const annots = await getAnnotations(pageNumber);
-    //   return annots.map((annot: { type: string }) => {
-    //     return `Annotation: ${annot.type}`;
-    //   });
-    // } catch (e) {
-    //   console.error("Error getting annotations:", e);
-    //   return [];
-    // }
-  };
-  
-  const displayPage = async (pageNumber: number) => {
-    // Clear previous page's annotations
-    clearAnnotations();
-    
-    if (!canvasRef.value) return;
-  
-    try {
-      const ctx = canvasRef.value.getContext('2d');
-      if (!ctx) return;
-  
-      // Apply zoom to scale
-      const baseScale = (window.devicePixelRatio * 96) / 72;
-      const scaledScale = baseScale * zoom.value;
-      const pngData = await renderPage(pageNumber);
-      const url = URL.createObjectURL(new Blob([pngData], { type: 'image/png' }));
-      pageUrls.value[pageNumber] = url;
-  
-      const img = new Image();
-      img.onload = () => {
-        canvasRef.value!.width = img.width;
-        canvasRef.value!.height = img.height;
-        if (overlayCanvasRef.value) {
-          overlayCanvasRef.value.width = img.width;
-          overlayCanvasRef.value.height = img.height;
-          overlayCanvasRef.value.style.transform = `scale(${zoom.value})`;
-          overlayCanvasRef.value.style.transformOrigin = 'top center';
-        }
-        canvasRef.value!.style.transform = `scale(${zoom.value})`;
-        canvasRef.value!.style.transformOrigin = 'top center';
-        ctx.drawImage(img, 0, 0);
-  
-        // Debug: Draw annotation boundaries
-        const currentPageAnnotations = pageAnnotations.value.filter(
-          (annotation: DocAnnotation) => annotation.page === (pageNumber + 1).toString()
-        );
-        
-        const PDF_POINTS_PER_INCH = 72;
-        const SCALE_FACTOR = 1;
-        const effectiveDpi = baseScale * PDF_POINTS_PER_INCH * SCALE_FACTOR;
-        
-        ctx.strokeStyle = 'red';
-        ctx.lineWidth = 2;
-        
-        for (const annotation of currentPageAnnotations) {
-          // Create unique ID for this annotation
-          const annotationId = `annotation-${annotation.page}-${annotation.line}`;
-          
-          // Draw polygon using all points
-          ctx.beginPath();
-          for (let i = 0; i < annotation.rect.length; i += 2) {
-            const x = annotation.rect[i] * effectiveDpi;
-            const y = annotation.rect[i + 1] * effectiveDpi;
-            if (i === 0) {
-              ctx.moveTo(x, y);
-            } else {
-              ctx.lineTo(x, y);
-            }
-          }
-          ctx.closePath();
-          // Add data attributes for hover
-          ctx.fillStyle = 'rgba(255, 0, 0, 0)';
-          ctx.fill();
-          ctx.stroke();
-          
-          // Save the path for hit testing
-          const path = new Path2D();
-          // Recreate the same path
-          for (let i = 0; i < annotation.rect.length; i += 2) {
-            const x = annotation.rect[i] * effectiveDpi;
-            const y = annotation.rect[i + 1] * effectiveDpi;
-            if (i === 0) {
-              path.moveTo(x, y);
-            } else {
-              path.lineTo(x, y);
-            }
-          }
-          path.closePath();
-          annotationPaths.value.set(annotationId, { path, annotation });
-        }
-      };
-      img.src = url;
-    } catch (err) {
-      console.error("Error rendering page:", err);
-      error.value = "Failed to render page";
-    }
-  };
-  
-  const loadPdf = async (file: string, docId: string) => {
-    if (!file) return;
-    
-    console.log('Loading PDF:', file);
-    isLoading.value = true;
-    error.value = null;
-    clearAnnotations();
-  
-    try {
-      const response = await fetch(file);
-  
-      const [pdfName, matchType, matchRange] = props.documentId!.split("/");
-  
-      let docAnnotations:any = {}
-      try {
-        //const anon = await fetch(runtime.public.pdfOverlayContainerBaseUrl + `${pdfName}.overlay.json`)
-        const anon = await fetch(docId)
-        docAnnotations = await anon.json()
-        console.log("ANNONS = ", docAnnotations)
-        pageAnnotations.value = docAnnotations?.overlay || [];
-      } catch (e) {
-        console.error("Error fetching overlay:", e);
-      }
-  
-      console.log('PDF fetch response:', response.status);
-      const arrayBuffer = await response.arrayBuffer();
-      console.log('PDF arrayBuffer size:', arrayBuffer.byteLength);
-      
-      await loadDocument(arrayBuffer, docAnnotations?.overlay);
-      console.log('PDF document loaded');
-      pdfDocument.value = true;
-          
-      totalPages.value = await getPageCount();
-      console.log('Total pages:', totalPages.value);
-      
-      metadata.value = {
-        format: await getMetadata("format") || '',
-        modDate: formatPdfDate(await getMetadata("info:ModDate") || ''),
-        author: await getMetadata("info:Author") || ''
-      };
-  
-      
-      if (currentPage.value === 0) {
-        displayPage(0);
-      }
-    } catch (err) {
-      console.error("Error loading PDF:", err);
-      error.value = "Failed to load PDF";
-    } finally {
-      isLoading.value = false;
-    }
-  };
-  
-  const goToPage = (page: number) => {
-    if (!pdfDocument.value) return;
-    if (page < 0 || page >= totalPages.value) return;
-    currentPage.value = page;
-    displayPage(page);
-  };
-  
-  const nextPage = () => goToPage(currentPage.value + 1);
-  const prevPage = () => goToPage(currentPage.value - 1);
-  
-  const zoomIn = () => {
-    zoom.value = Math.min(zoom.value * 1.2, 3);
-    if (pdfDocument.value) {
-      displayPage(currentPage.value);
-    }
-  };
-  
-  const zoomOut = () => {
-    zoom.value = Math.max(zoom.value / 1.2, 0.3);
-    if (pdfDocument.value) {
-      displayPage(currentPage.value);
-    }
-  };
-  
-  const handleCanvasClick = (event: MouseEvent) => {
-    if (!canvasRef.value || !overlayCanvasRef.value) return;
-    const ctx = canvasRef.value.getContext('2d');
-    if (!ctx) return;
-    
-    const rect = canvasRef.value.getBoundingClientRect();
-    const scaleX = canvasRef.value.width / rect.width;
-    const scaleY = canvasRef.value.height / rect.height;
-    
-    const x = (event.clientX - rect.left) * scaleX;
-    const y = (event.clientY - rect.top) * scaleY;
-    
-    for (const { path, annotation } of annotationPaths.value.values()) {
-      if (ctx.isPointInPath(path, x, y)) {
-        selectedAnnotation.value = annotation;
-        showDialog.value = true;
-        break;
-      }
-    }
-  };
-  
-  const isPointInPolygon = (point: { x: number, y: number }, polygon: number[]) => {
-    let inside = false;
-    for (let i = 0, j = polygon.length - 2; i < polygon.length; i += 2) {
-      const xi = polygon[i], yi = polygon[i + 1];
-      const xj = polygon[j], yj = polygon[j + 1];
-      
-      const intersect = ((yi > point.y) !== (yj > point.y))
-          && (point.x < (xj - xi) * (point.y - yi) / (yj - yi) + xi);
-      if (intersect) inside = !inside;
-      
-      j = i;
-    }
-    return inside;
-  };
-  
-  const handleCanvasMouseMove = (event: MouseEvent) => {
-    if (!canvasRef.value || !overlayCanvasRef.value) return;
-    const ctx = overlayCanvasRef.value.getContext('2d');
-    if (!ctx) return;
-    
-    const rect = canvasRef.value.getBoundingClientRect();
-    const scaleX = canvasRef.value.width / rect.width;
-    const scaleY = canvasRef.value.height / rect.height;
-    
-    const x = (event.clientX - rect.left) * scaleX;
-    const y = (event.clientY - rect.top) * scaleY;
-    
-    // Clear overlay
-    ctx.clearRect(0, 0, overlayCanvasRef.value.width, overlayCanvasRef.value.height);
-    
-    let isOverAnnotation = false;
-    // Check for hover over annotations
-    for (const { path, annotation } of annotationPaths.value.values()) {
-      if (ctx.isPointInPath(path, x, y)) {
-        isOverAnnotation = true;
-        // Draw highlighted polygon
-        ctx.save();
-        ctx.fillStyle = 'rgba(255, 0, 0, 0.2)';
-        ctx.fill(path);
-        ctx.strokeStyle = 'red';
-        ctx.lineWidth = 2;
-        ctx.stroke(path);
-        ctx.restore();
-        break;
-      }
-    }
-      
-    canvasRef.value.style.cursor = isOverAnnotation ? 'pointer' : 'default';
-  };
   
   watch(
     () => props.file,
@@ -440,8 +158,8 @@
   });
   
   watch(canvasRef, (newCanvas) => {
-    if (newCanvas && currentPage.value === 0) {
-      console.log("Canvas now available, rendering first page");
+    if (newCanvas && pdfDocument.value && currentPage.value === 0) {
+      console.log("Canvas now available, displaying first page");
       displayPage(0);
     }
   });

@@ -20,7 +20,7 @@ export interface DocAnnotation {
     page: string,
     line: number, 
     content: string, 
-    rect: [number, number, number, number]
+    rect: number[]
 }
 
 export class MupdfWorker {

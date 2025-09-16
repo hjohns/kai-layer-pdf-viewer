@@ -1,12 +1,10 @@
 import { MUPDF_LOADED, type DocAnnotation, type MupdfWorker } from '@/workers/mupdf.worker';
 import * as Comlink from 'comlink';
 import { ref, shallowRef } from 'vue';
-import { useRuntimeConfig } from '#app'
 import * as mupdfjs from 'mupdf';
 import type { PDFPage } from 'mupdf';
 
 
-const config = useRuntimeConfig()
 const baseURL = window?.location?.origin || 'http://localhost:3000'
 console.log('Worker base URL:', baseURL)
 
@@ -110,6 +108,7 @@ export function useMuPdf() {
     annotations,
     getMetadata,
     addSquareAnnotation,
+    getAnnotations,
     addAnnotation
   };
 }
