@@ -17,6 +17,7 @@ The custom annotation system consists of:
 
 ```typescript
 import { usePdfAnnotations } from '@/composables/usePdfAnnotations';
+import type { OverlayAnnotation } from '@/types/annotations';
 import type { AnnotationProvider, AnnotationRenderContext } from '@/composables/usePdfAnnotations';
 
 const { registerAnnotationProvider, unregisterAnnotationProvider } = usePdfAnnotations();
@@ -95,7 +96,7 @@ interface AnnotationProvider {
   id: string;                          // Unique identifier
   name: string;                        // Human-readable name
   description?: string;                // Optional description
-  canHandle: (annotation: DocAnnotation) => boolean;  // Determines if this provider handles the annotation
+  canHandle: (annotation: OverlayAnnotation) => boolean;  // Determines if this provider handles the annotation
   render: (context: AnnotationRenderContext) => void; // Renders the annotation
   priority?: number;                   // Priority (higher = more important)
 }
@@ -117,7 +118,7 @@ getAnnotationProvider(id: string): AnnotationProvider | undefined
 getAllProviders(): AnnotationProvider[]
 
 // Find the best provider for an annotation
-findProviderForAnnotation(annotation: DocAnnotation): AnnotationProvider
+findProviderForAnnotation(annotation: OverlayAnnotation): AnnotationProvider
 ```
 
 ## Examples
@@ -286,8 +287,41 @@ A comprehensive test page is available at `/tests/PDF-02-annotation-provider.vue
 
 ```vue
 <template>
-  <PDFViewer :file="pdfFile" :documentId="documentId" />
+  <PDFViewer 
+    :file="pdfFile" 
+    :overlays="overlays"
+    @overlay-click="handleOverlayClick"
+    @canvas-click="handleCanvasClick"
+  />
 </template>
+
+<script setup>
+// Handle overlay-specific clicks
+const handleOverlayClick = (overlay, context) => {
+  console.log('Overlay clicked:', overlay.content);
+  console.log('Click context:', context); // { x, y, pageNumber }
+  
+  // Your custom logic here
+  showCustomDialog(overlay);
+};
+
+// Handle general canvas clicks (empty areas)
+const handleCanvasClick = (context) => {
+  console.log('Canvas clicked at:', context); // { x, y, pageNumber }
+};
+</script>
+```
+
+### Event System
+
+The PDFViewer emits two distinct click events:
+
+- **`overlay-click`**: Fired when an overlay annotation is clicked
+  - Parameters: `overlay` (OverlayAnnotation), `context` (click coordinates and page)
+- **`canvas-click`**: Fired when empty canvas area is clicked  
+  - Parameters: `context` (click coordinates and page)
+
+By default, no action is taken when overlays are clicked - you have full control over the behavior.
 
 <script setup>
 import { onMounted } from 'vue';

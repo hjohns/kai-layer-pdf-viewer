@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "build": "nuxt build",
-    "dev": "nuxt dev",
+    "dev": "nuxt dev --force",
     "generate": "nuxt generate",
     "types": "nuxt typecheck",
     "preview": "nuxt preview",
@@ -20,6 +20,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "comlink": "^4.4.2",
+    "html2canvas": "^1.4.1",
     "lucide-vue-next": "^0.483.0",
     "mupdf": "^1.26.4",
     "nuxt": "^3.16.1",

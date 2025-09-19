@@ -1,4 +1,5 @@
-import { MUPDF_LOADED, type DocAnnotation, type MupdfWorker } from '@/workers/mupdf.worker';
+import { MUPDF_LOADED, type MupdfWorker } from '@/workers/mupdf.worker';
+import type { OverlayAnnotation } from '@/types/annotations';
 import * as Comlink from 'comlink';
 import { ref, shallowRef } from 'vue';
 import * as mupdfjs from 'mupdf';
@@ -69,7 +70,7 @@ export function useMuPdf() {
   // ===> Here you can create functions <===
   // ===> that use the methods of the worker. <===
 
-  const loadDocument = (arrayBuffer: ArrayBuffer, annotations: DocAnnotation[]) => {
+  const loadDocument = (arrayBuffer: ArrayBuffer, annotations: OverlayAnnotation[]) => {
     document.value = arrayBuffer;
     return mupdfWorker.loadDocument(arrayBuffer, annotations);
   };

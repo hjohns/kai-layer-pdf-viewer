@@ -3,24 +3,17 @@ import { DateTime } from 'luxon';
 import { useMuPdf } from './useMuPdf';
 import { usePdfAnnotations } from './usePdfAnnotations';
 
-export function usePdf() {
+import type { OverlayAnnotation } from '@/types/annotations';
+import type { AnnotationRenderContext } from './usePdfAnnotations';
+
+export function usePdf(
+  htmlAnnotation?: (context: AnnotationRenderContext, annotation: OverlayAnnotation) => string,
+  onOverlayClick?: (overlay: OverlayAnnotation, context: { x: number, y: number, pageNumber: number }) => void,
+  onCanvasClick?: (context: { x: number, y: number, pageNumber: number }) => void
+) {
   const { workerInitialized, loadDocument, renderPage, getPageCount, getMetadata } = useMuPdf();
-  const { 
-    pageAnnotations, 
-    selectedAnnotation, 
-    showDialog, 
-    loadAnnotations, 
-    drawAnnotations, 
-    handleAnnotationClick, 
-    handleAnnotationHover, 
-    drawHoverEffect, 
-    drawAnnotationText,
-    clearAnnotations, 
-    closeDialog, 
-    selectedAnnotationContent 
-  } = usePdfAnnotations();
   
-  // State
+  // State - declare refs first
   const pdfDocument = ref<any | null>(null);
   const currentPage = ref(0);
   const totalPages = ref(0);
@@ -31,6 +24,26 @@ export function usePdf() {
   const metadata = ref({ format: '', modDate: '', author: '' });
   const canvasRef = ref<HTMLCanvasElement | null>(null);
   const overlayCanvasRef = ref<HTMLCanvasElement | null>(null);
+  const htmlOverlayContainer = ref<HTMLElement | null>(null);
+  
+  // Initialize annotations with canvas and overlay container refs
+  const { 
+    pageAnnotations, 
+    selectedAnnotation, 
+    showDialog, 
+    loadAnnotations, 
+    initializePdfCoordinates,
+    drawAnnotations, 
+    handleAnnotationClick, 
+    handleAnnotationHover, 
+    drawHoverEffect, 
+    drawAnnotationText,
+    clearAnnotations, 
+    closeDialog, 
+    selectedAnnotationContent,
+    cleanupProviders,
+    getAnnotationAtPoint
+  } = usePdfAnnotations(canvasRef, htmlOverlayContainer, htmlAnnotation, onOverlayClick);
 
   // Format PDF date strings
   const formatPdfDate = (dateStr: string) => {
@@ -50,6 +63,10 @@ export function usePdf() {
     if (!file) return;
     
     clearAnnotations();
+    
+    // Initialize simple coordinate system (no external dependencies)
+    console.log('[PDF Loading] Initializing simple coordinate system');
+    initializePdfCoordinates();
     
     // Load annotations using the composable
     await loadAnnotations(docId);
@@ -200,10 +217,40 @@ export function usePdf() {
     const x = (event.clientX - rect.left) * scaleX;
     const y = (event.clientY - rect.top) * scaleY;
     
-    handleAnnotationClick(x, y, ctx);
+    // Check if an overlay was clicked
+    const clickedOverlay = getAnnotationAtPoint(x, y, ctx);
+    
+    if (clickedOverlay) {
+      // Emit overlay-specific click event
+      const context = { x, y, pageNumber: currentPage.value };
+      if (onOverlayClick) {
+        onOverlayClick(clickedOverlay, context);
+      }
+    } else {
+      // Emit general canvas click event
+      const context = { x, y, pageNumber: currentPage.value };
+      if (onCanvasClick) {
+        onCanvasClick(context);
+      }
+    }
   };
 
-  const handleCanvasMouseMove = (event: MouseEvent) => {
+  // Track previous hover state to avoid unnecessary redraws
+  const previousHoverState = ref(false);
+  const previousHoveredAnnotation = ref<any>(null);
+  
+  // Function to clear HTML overlays
+  const clearHtmlOverlays = () => {
+    if (htmlOverlayContainer.value) {
+      const overlays = htmlOverlayContainer.value.querySelectorAll('.pdf-simple-html-overlay');
+      overlays.forEach(overlay => overlay.remove());
+      console.log('[HTML Overlays] Cleared', overlays.length, 'overlays');
+    }
+  };
+  
+
+
+  const handleCanvasMouseMove = async (event: MouseEvent) => {
     if (!canvasRef.value || !overlayCanvasRef.value) return;
     const ctx = overlayCanvasRef.value.getContext('2d');
     if (!ctx) return;
@@ -215,23 +262,77 @@ export function usePdf() {
     const x = (event.clientX - rect.left) * scaleX;
     const y = (event.clientY - rect.top) * scaleY;
     
-    // Clear overlay
-    ctx.clearRect(0, 0, overlayCanvasRef.value.width, overlayCanvasRef.value.height);
-    
     // Check for hover over annotations using composable
     const isOverAnnotation = handleAnnotationHover(x, y, ctx);
     
-    if (isOverAnnotation) {
-      // Calculate effective DPI for text rendering
-      const baseScale = (window.devicePixelRatio * 96) / 72;
-      const PDF_POINTS_PER_INCH = 72;
-      const SCALE_FACTOR = 1;
-      const effectiveDpi = baseScale * PDF_POINTS_PER_INCH * SCALE_FACTOR;
+    // Only redraw if hover state changed or if we're hovering over a different annotation
+    const currentAnnotation = isOverAnnotation ? getAnnotationAtPoint(x, y, ctx) : null;
+    const annotationChanged = previousHoveredAnnotation.value !== currentAnnotation;
+    const hoverStateChanged = previousHoverState.value !== isOverAnnotation;
+    
+    if (hoverStateChanged || annotationChanged) {
+      // Clear overlay
+      ctx.clearRect(0, 0, overlayCanvasRef.value.width, overlayCanvasRef.value.height);
       
-      drawHoverEffect(ctx, x, y, effectiveDpi);
+      // Only clear HTML overlays when not hovering or annotation changed (but not when just moving within same annotation)
+      if (!isOverAnnotation) {
+        clearHtmlOverlays();
+      } else if (annotationChanged) {
+        clearHtmlOverlays();
+      }
+      
+      if (isOverAnnotation) {
+        // Calculate effective DPI for text rendering
+        const baseScale = (window.devicePixelRatio * 96) / 72;
+        const PDF_POINTS_PER_INCH = 72;
+        const SCALE_FACTOR = 1;
+        const effectiveDpi = baseScale * PDF_POINTS_PER_INCH * SCALE_FACTOR;
+        
+        await drawHoverEffect(ctx, x, y, effectiveDpi);
+      }
+      
+      // Update tracking state
+      previousHoverState.value = isOverAnnotation;
+      previousHoveredAnnotation.value = currentAnnotation;
     }
       
     canvasRef.value.style.cursor = isOverAnnotation ? 'pointer' : 'default';
+  };
+
+  // Handle mouse leave - clear all overlays (but be more careful about when this triggers)
+  const handleCanvasMouseLeave = (event: MouseEvent) => {
+    // Check if we're actually leaving the canvas area or just moving to an overlay
+    const canvas = canvasRef.value;
+    if (!canvas || !overlayCanvasRef.value) return;
+    
+    const rect = canvas.getBoundingClientRect();
+    const mouseX = event.clientX;
+    const mouseY = event.clientY;
+    
+    // Only clear if mouse is actually outside the canvas bounds
+    const isOutsideCanvas = (
+      mouseX < rect.left || 
+      mouseX > rect.right || 
+      mouseY < rect.top || 
+      mouseY > rect.bottom
+    );
+    
+    if (isOutsideCanvas) {
+      const ctx = overlayCanvasRef.value.getContext('2d');
+      if (!ctx) return;
+      
+      // Clear canvas overlay
+      ctx.clearRect(0, 0, overlayCanvasRef.value.width, overlayCanvasRef.value.height);
+      
+      // Clear HTML overlays
+      clearHtmlOverlays();
+      
+      // Reset hover state
+      previousHoverState.value = false;
+      previousHoveredAnnotation.value = null;
+      
+      console.log('[Canvas Mouse Leave] Cleared all overlays (mouse truly outside canvas)');
+    }
   };
 
   // Canvas management
@@ -278,6 +379,7 @@ export function usePdf() {
     workerInitialized,
     canvasRef,
     overlayCanvasRef,
+    htmlOverlayContainer,
 
     // Annotation state (re-exported from usePdfAnnotations)
     pageAnnotations,
@@ -287,6 +389,7 @@ export function usePdf() {
 
     // Methods
     loadPdf,
+    initializePdfCoordinates,
     displayPage,
     goToPage,
     nextPage,
@@ -297,12 +400,17 @@ export function usePdf() {
     formatPdfDate,
     handleCanvasClick,
     handleCanvasMouseMove,
+    handleCanvasMouseLeave,
     clearOverlayCanvas,
     cleanup,
     cleanupPageUrls,
 
     // Annotation methods (re-exported from usePdfAnnotations)
     closeDialog,
+    cleanupProviders,
+    
+    // HTML overlay management
+    clearHtmlOverlays,
 
     // Computed
     canGoNext,

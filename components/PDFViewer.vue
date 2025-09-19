@@ -60,12 +60,21 @@
                 style="min-width: 100px; min-height: 100px;"
                 @click="handleCanvasClick"
                 @mousemove="handleCanvasMouseMove"
+                @mouseleave="handleCanvasMouseLeave"
               ></canvas>
               <canvas
                 ref="overlayCanvasRef"
                 class="absolute top-0 left-0 pointer-events-none"
                 style="min-width: 100px; min-height: 100px;"
               ></canvas>
+              <!-- HTML Overlay Container - Built into PDFViewer -->
+              <div 
+                ref="htmlOverlayContainer"
+                class="absolute top-0 left-0 w-full h-full"
+                style="z-index: 50; pointer-events: none;"
+              >
+                <!-- HTML overlay elements will be added here automatically -->
+              </div>
             </div>
           </div>
         </div>
@@ -75,34 +84,27 @@
         </div>
       </div>
   
-      <Dialog :open="showDialog" @update:open="showDialog = $event" modal>
-        <DialogContent class="z-[100]">
-          <DialogHeader>
-            <DialogTitle>Annotation Details</DialogTitle>
-          </DialogHeader>
-          <div v-if="selectedAnnotation">
-            <p class="text-lg">{{ selectedAnnotationContent }}</p>
-          </div>
-          <div>
-            
-          </div>
-          <div class="flex justify-end gap-2 mt-4">
-            <Button @click="closeDialog">
-              Approve
-            </Button>
-            <Button variant="secondary" @click="closeDialog">
-              Reject
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
     </div>
   </template>
   
   <script setup lang="ts">
   import { watch, onMounted, onBeforeUnmount } from "vue";  
+  import { usePdf } from '@/composables/usePdf';
   
-  const props = defineProps<{ documentId: string | null, file: string }>();
+  import type { OverlayAnnotation } from '@/types/annotations';
+  import type { AnnotationRenderContext } from '@/composables/usePdfAnnotations';
+
+  const props = defineProps<{ 
+    overlays: string | null, 
+    file: string,
+    htmlAnnotation?: (context: AnnotationRenderContext, annotation: OverlayAnnotation) => string
+  }>();
+
+  // Define events that the component can emit
+  const emit = defineEmits<{
+    'overlay-click': [overlay: OverlayAnnotation, context: { x: number, y: number, pageNumber: number }]
+    'canvas-click': [event: { x: number, y: number, pageNumber: number }]
+  }>();
   
   const { 
     // State
@@ -115,14 +117,12 @@
     workerInitialized,
     canvasRef,
     overlayCanvasRef,
+    htmlOverlayContainer,
     
-    // Annotation state
-    selectedAnnotation,
-    showDialog,
-    selectedAnnotationContent,
     
     // Methods
     loadPdf,
+    initializePdfCoordinates,
     displayPage,
     goToPage,
     nextPage,
@@ -131,14 +131,25 @@
     zoomOut,
     handleCanvasClick,
     handleCanvasMouseMove,
+    handleCanvasMouseLeave,
     cleanup,
-    closeDialog,
+    cleanupProviders,
     
     // Computed
     canGoNext,
     canGoPrev,
     zoomPercentage
-  } = usePdf();
+  } = usePdf(
+    props.htmlAnnotation,
+    // onOverlayClick handler
+    (overlay: OverlayAnnotation, context: { x: number, y: number, pageNumber: number }) => {
+      emit('overlay-click', overlay, context);
+    },
+    // onCanvasClick handler  
+    (context: { x: number, y: number, pageNumber: number }) => {
+      emit('canvas-click', context);
+    }
+  );
   
   
   watch(
@@ -146,14 +157,14 @@
     async (newFile) => {
       if (!newFile) return;
       console.log("File changed, loading new PDF:", newFile);
-      await loadPdf(newFile, props.documentId!);
+      await loadPdf(newFile, props.overlays!);
     },
     { immediate: true }
   );
   
   watch(workerInitialized, async (isInitialized) => {
     if (isInitialized && props.file) {
-      await loadPdf(props.file, props.documentId!);
+      await loadPdf(props.file, props.overlays!);
     }
   });
   
@@ -178,15 +189,6 @@
   </script>
   
   <style scoped>
-  :deep(.fixed) {
-    position: fixed;
-    z-index: 100;
-  }
-  
-  :deep([role="dialog"]) {
-    position: relative;
-    z-index: 100;
-  }
   
   .pdf-viewer-wrapper {
     @apply h-full flex flex-col;

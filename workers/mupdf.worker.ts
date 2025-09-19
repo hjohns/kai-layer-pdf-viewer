@@ -3,6 +3,7 @@ console.log('Worker script starting...');
 import * as Comlink from 'comlink';
 import * as mupdfjs from 'mupdf';
 import type { PDFDocument, PDFPage } from 'mupdf';
+import type { OverlayAnnotation } from '@/types/annotations';
 console.log('Imports completed');
 
 export const MUPDF_LOADED = 'MUPDF_LOADED';
@@ -16,16 +17,9 @@ export interface MupdfWorker {
   getMetadata(name: string): Promise<string | undefined>;
 }
 
-export interface DocAnnotation {
-    page: string,
-    line: number, 
-    content: string, 
-    rect: number[]
-}
-
 export class MupdfWorker {
   private document?: PDFDocument;
-  private docAnnotations: DocAnnotation[] = [];
+  private overlayAnnotations: OverlayAnnotation[] = [];
 
   constructor() {
     console.log('MupdfWorker constructor called');
@@ -56,12 +50,12 @@ export class MupdfWorker {
   // ===> that call statics and methods <===
   // ===> from mupdfjs which wraps ./node_modules/mupdf/dist/mupdf.js <===
 
-  async loadDocument(document: ArrayBuffer, annotations?: DocAnnotation[]): Promise<void> {
+  async loadDocument(document: ArrayBuffer, annotations?: OverlayAnnotation[]): Promise<void> {
     console.log('Worker: Loading document, size:', document.byteLength);
     this.document = mupdfjs.Document.openDocument(document, 'application/pdf') as PDFDocument;
     console.log('Worker: Document loaded');
-    this.docAnnotations = annotations ?? [];
-    console.log("Doc annotations:", this.docAnnotations);
+    this.overlayAnnotations = annotations ?? [];
+    console.log("Overlay annotations:", this.overlayAnnotations);
   }
 
   async renderPageAsImage(pageIndex: number, scale: number, pageAnnotations?: Array<{
@@ -84,8 +78,8 @@ export class MupdfWorker {
       annotation.destroy();
     }
 
-    const annotations = pageAnnotations || this.docAnnotations.filter(annotation => annotation.page === (pageIndex + 1).toString()) || [];
-    console.log("Doc for page", pageIndex, "annotations:", annotations);
+    const annotations = pageAnnotations || this.overlayAnnotations.filter(annotation => annotation.page === (pageIndex + 1).toString()) || [];
+    console.log("Overlay annotations for page", pageIndex, ":", annotations);
 
     if(annotations.length > 0) {
       for(const annotation of annotations) {
