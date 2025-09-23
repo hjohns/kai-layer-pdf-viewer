@@ -112,13 +112,81 @@ export function usePdfAnnotations(
     lineHeight: 1.2 // Line height multiplier
   });
 
-  // Load annotations from JSON file
+  // Utility function to convert JSONLD geometry format to rect array
+  const convertJsonLDGeometry = (geometry: string): number[] => {
+    if (!geometry) return [];
+
+    // JSONLD geometry format: "x1,y1 x2,y2 x3,y3 x4,y4"
+    // Convert to rect format: [x1, y1, x2, y2, x3, y3, x4, y4]
+    const coordinates = geometry.trim().split(/\s+/);
+    const rect: number[] = [];
+
+    for (const coord of coordinates) {
+      const [x, y] = coord.split(',').map(Number);
+      if (!isNaN(x) && !isNaN(y)) {
+        rect.push(x, y);
+      }
+    }
+
+    return rect;
+  };
+
+  // Utility function to detect if data is JSONLD format
+  const isJsonLD = (data: any): boolean => {
+    return data['@graph'] !== undefined || data['@context'] !== undefined;
+  };
+
+  // Transform JSONLD table cells to OverlayAnnotation format
+  const transformJsonLDToOverlay = (data: any, defaultPage: string = "8"): OverlayAnnotation[] => {
+    if (!data['@graph'] || !Array.isArray(data['@graph'])) {
+      return [];
+    }
+
+    return data['@graph'].map((item: any, index: number) => {
+      // Extract basic properties
+      const content = item['doc:content'] || item.content || '';
+      const geometry = item['geom:hasGeometry'] || item.geometry || '';
+      const rect = convertJsonLDGeometry(geometry);
+
+      // Extract semantic properties
+      const semanticProperties: Record<string, any> = {};
+      if (item['doc:row']) semanticProperties.row = item['doc:row']['@value'] || item['doc:row'];
+      if (item['doc:column']) semanticProperties.column = item['doc:column']['@value'] || item['doc:column'];
+      if (item['doc:confidence']) semanticProperties.confidence = item['doc:confidence']['@value'] || item['doc:confidence'];
+      if (item['sdo:isPartOf']) semanticProperties.isPartOf = item['sdo:isPartOf']['@id'] || item['sdo:isPartOf'];
+
+      // Create OverlayAnnotation
+      const annotation: OverlayAnnotation = {
+        page: defaultPage,
+        line: index,
+        content,
+        rect,
+        '@id': item['@id'],
+        '@type': item['@type'],
+        '@context': data['@context'],
+        semanticProperties
+      };
+
+      return annotation;
+    });
+  };
+
+  // Load annotations from JSON or JSONLD file
   const loadAnnotations = async (docId: string) => {
     try {
       const response = await fetch(docId);
       const data = await response.json();
-      pageAnnotations.value = data?.overlay || [];
-      console.log('Loaded annotations:', pageAnnotations.value.length);
+
+      if (isJsonLD(data)) {
+        // Handle JSONLD format
+        pageAnnotations.value = transformJsonLDToOverlay(data);
+        console.log('Loaded JSONLD annotations:', pageAnnotations.value.length);
+        console.log('Sample annotation:', pageAnnotations.value[0]);
+      } else {
+        // Handle traditional JSON format
+        pageAnnotations.value = data?.overlay || [];
+        console.log('Loaded JSON annotations:', pageAnnotations.value.length);
+      }
     } catch (error) {
       console.error('Error loading annotations:', error);
       pageAnnotations.value = [];
