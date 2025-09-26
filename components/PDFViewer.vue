@@ -92,20 +92,42 @@
   import { usePdf } from '@/composables/usePdf';
   
   import type { OverlayAnnotation } from '@/types/annotations';
-  import type { AnnotationRenderContext } from '@/composables/usePdfAnnotations';
+import type { AnnotationRenderContext } from '@/composables/usePdfAnnotations';
+import type { MouseLineTooltipOptions } from '@/composables/useMouseGuide';
 
-  const props = defineProps<{ 
-    overlays: string | null, 
-    file: string,
-    htmlAnnotation?: (context: AnnotationRenderContext, annotation: OverlayAnnotation) => string
-  }>();
+type MouseLineTooltipProp = boolean | ({ enabled?: boolean } & Partial<Omit<MouseLineTooltipOptions, 'enabled'>>);
 
-  // Define events that the component can emit
-  const emit = defineEmits<{
-    'overlay-click': [overlay: OverlayAnnotation, context: { x: number, y: number, pageNumber: number }]
+interface MouseLinePropConfig {
+  enabled?: boolean;
+  color?: string;
+  width?: number;
+  tooltips?: MouseLineTooltipProp;
+}
+
+const props = defineProps<{ 
+  overlays: string | null, 
+  file: string,
+  htmlAnnotation?: (context: AnnotationRenderContext, annotation: OverlayAnnotation) => string,
+  mouseLine?: MouseLinePropConfig
+}>();
+
+// Define events that the component can emit
+const emit = defineEmits<{
+  'overlay-click': [overlay: OverlayAnnotation, context: { x: number, y: number, pageNumber: number }]
     'canvas-click': [event: { x: number, y: number, pageNumber: number }]
-  }>();
-  
+    'mouse-line-intersections': [context: { x: number; pageNumber: number; overlays: OverlayAnnotation[] }]
+}>();
+
+const toMouseLineOptions = (config?: MouseLinePropConfig) => ({
+  enabled: config?.enabled ?? false,
+  color: config?.color ?? 'rgba(59, 130, 246, 0.65)',
+  width: config?.width ?? 1.5,
+  tooltips: config?.tooltips,
+  onIntersections: (context: { x: number; pageNumber: number; overlays: OverlayAnnotation[] }) => {
+    emit('mouse-line-intersections', context);
+  }
+});
+
   const { 
     // State
     pdfDocument,
@@ -134,6 +156,7 @@
     handleCanvasMouseLeave,
     cleanup,
     cleanupProviders,
+    setMouseLineOptions,
     
     // Computed
     canGoNext,
@@ -148,25 +171,48 @@
     // onCanvasClick handler  
     (context: { x: number, y: number, pageNumber: number }) => {
       emit('canvas-click', context);
+    },
+    {
+      mouseLine: toMouseLineOptions(props.mouseLine)
     }
   );
   
-  
+  let lastLoadedFile: string | null = null;
+
+  const loadCurrentPdf = async () => {
+    if (!props.file || !workerInitialized.value) {
+      return;
+    }
+
+    if (!props.overlays) {
+      console.warn('PDFViewer: overlays source missing, skipping load');
+      return;
+    }
+
+    if (lastLoadedFile === props.file) {
+      return;
+    }
+
+    console.log("Loading PDF:", props.file);
+    await loadPdf(props.file, props.overlays);
+    lastLoadedFile = props.file;
+  };
+
   watch(
-    () => props.file,
-    async (newFile) => {
-      if (!newFile) return;
-      console.log("File changed, loading new PDF:", newFile);
-      await loadPdf(newFile, props.overlays!);
+    [() => props.file, workerInitialized],
+    async () => {
+      await loadCurrentPdf();
     },
     { immediate: true }
   );
-  
-  watch(workerInitialized, async (isInitialized) => {
-    if (isInitialized && props.file) {
-      await loadPdf(props.file, props.overlays!);
+
+  watch(
+    () => props.overlays,
+    async () => {
+      lastLoadedFile = null;
+      await loadCurrentPdf();
     }
-  });
+  );
   
   watch(canvasRef, (newCanvas) => {
     if (newCanvas && pdfDocument.value && currentPage.value === 0) {
@@ -174,6 +220,14 @@
       displayPage(0);
     }
   });
+
+  watch(
+    () => props.mouseLine,
+    (config) => {
+      setMouseLineOptions(toMouseLineOptions(config));
+    },
+    { deep: true }
+  );
   
   onMounted(() => {
     console.log("Component mounted, canvas ref:", canvasRef.value);

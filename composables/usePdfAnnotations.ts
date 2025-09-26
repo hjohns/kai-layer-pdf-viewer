@@ -2,6 +2,13 @@ import { ref, computed, type Ref } from 'vue';
 import html2canvas from 'html2canvas';
 import type { OverlayAnnotation } from '@/types/annotations';
 import { usePdfCoordinates } from './usePdfCoordinates';
+import type { AnnotationPathData } from './useAnnotationGeometry';
+import {
+  convertCoordinates,
+  createAnnotationPath,
+  getAnnotationsIntersectingVerticalLine
+} from './useAnnotationGeometry';
+import { getConfidenceColors } from './useAnnotationStyling';
 
 // Custom annotation provider interfaces
 export interface AnnotationRenderContext {
@@ -87,7 +94,7 @@ export function usePdfAnnotations(
   // State
   const pageAnnotations = ref<OverlayAnnotation[]>([]);
   const selectedAnnotation = ref<OverlayAnnotation | null>(null);
-  const annotationPaths = ref(new Map<string, { path: Path2D, annotation: OverlayAnnotation }>());
+  const annotationPaths = ref(new Map<string, AnnotationPathData>());
   const showDialog = ref(false);
   
   // Use global singleton state
@@ -165,14 +172,14 @@ export function usePdfAnnotations(
         '@type': item['@type'],
         '@context': data['@context'],
         semanticProperties
-      };
-
-      return annotation;
-    });
   };
 
-  // Load annotations from JSON or JSONLD file
-  const loadAnnotations = async (docId: string) => {
+  return annotation;
+});
+};
+
+// Load annotations from JSON or JSONLD file
+const loadAnnotations = async (docId: string) => {
     try {
       const response = await fetch(docId);
       const data = await response.json();
@@ -206,34 +213,6 @@ export function usePdfAnnotations(
     );
   };
 
-  // Convert annotation coordinates to canvas coordinates
-  const convertCoordinates = (rect: number[], effectiveDpi: number) => {
-    const points: [number, number][] = [];
-    for (let i = 0; i < rect.length; i += 2) {
-      const x = rect[i] * effectiveDpi;
-      const y = rect[i + 1] * effectiveDpi;
-      points.push([x, y]);
-    }
-    return points;
-  };
-
-  // Create Path2D for annotation
-  const createAnnotationPath = (rect: number[], effectiveDpi: number): Path2D => {
-    const path = new Path2D();
-    const points = convertCoordinates(rect, effectiveDpi);
-    
-    for (let i = 0; i < points.length; i++) {
-      const [x, y] = points[i];
-      if (i === 0) {
-        path.moveTo(x, y);
-      } else {
-        path.lineTo(x, y);
-      }
-    }
-    path.closePath();
-    return path;
-  };
-
   // Draw annotations on canvas
   const drawAnnotations = (
     ctx: CanvasRenderingContext2D, 
@@ -242,24 +221,30 @@ export function usePdfAnnotations(
   ) => {
     const currentPageAnnotations = getAnnotationsForPage(pageNumber);
     
-    ctx.strokeStyle = 'red';
-    ctx.lineWidth = 2;
-    
     // Clear existing paths
     annotationPaths.value.clear();
     
     for (const annotation of currentPageAnnotations) {
       const annotationId = `annotation-${annotation.page}-${annotation.line}`;
-      const path = createAnnotationPath(annotation.rect, effectiveDpi);
+      const pathData = createAnnotationPath(annotation, effectiveDpi);
+      if (!pathData) {
+        continue;
+      }
+      const { path } = pathData;
+      const { fill, stroke } = getConfidenceColors(annotation);
       
       // Draw the annotation
+      ctx.save();
       ctx.beginPath();
-      ctx.fillStyle = 'rgba(255, 0, 0, 0)';
+      ctx.fillStyle = fill;
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = 2;
       ctx.fill(path);
       ctx.stroke(path);
+      ctx.restore();
       
       // Store path for hit testing
-      annotationPaths.value.set(annotationId, { path, annotation });
+      annotationPaths.value.set(annotationId, pathData);
     }
   };
 
@@ -271,6 +256,10 @@ export function usePdfAnnotations(
       }
     }
     return null;
+  };
+
+  const findAnnotationsIntersectingVerticalLine = (x: number, ctx: CanvasRenderingContext2D) => {
+    return getAnnotationsIntersectingVerticalLine(annotationPaths.value.values(), x, ctx);
   };
 
   // Handle annotation click (legacy - kept for backward compatibility)
@@ -800,11 +789,13 @@ export function usePdfAnnotations(
       const { path } = annotationPaths.value.get(annotationId) || { path: null };
       
       if (path) {
+        const { fill, stroke } = getConfidenceColors(annotation, { highlight: true });
+
         ctx.save();
-        ctx.fillStyle = 'rgba(255, 0, 0, 0.2)';
-        ctx.fill(path);
-        ctx.strokeStyle = 'red';
+        ctx.fillStyle = fill;
+        ctx.strokeStyle = stroke;
         ctx.lineWidth = 2;
+        ctx.fill(path);
         ctx.stroke(path);
         ctx.restore();
         
@@ -979,6 +970,7 @@ export function usePdfAnnotations(
     createAnnotationPath,
     drawAnnotations,
     getAnnotationAtPoint,
+    getAnnotationsIntersectingVerticalLine: findAnnotationsIntersectingVerticalLine,
     handleAnnotationClick,
     showAnnotationDialog,
     handleAnnotationHover,
