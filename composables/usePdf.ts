@@ -2,21 +2,37 @@ import { ref, computed, toRaw } from 'vue';
 import { DateTime } from 'luxon';
 import { useMuPdf } from './useMuPdf';
 import { usePdfAnnotations } from './usePdfAnnotations';
-import { useMouseGuide, type MouseLineOptions, type MouseLineTooltipOptions } from './useMouseGuide';
+import {
+  useMouseGuide,
+  type MouseLineOptions,
+  type MouseLineTooltipOptions,
+  type MouseLineOrientation,
+  type MouseLineIntersectionContext
+} from './useMouseGuide';
 
 import type { OverlayAnnotation } from '@/types/annotations';
-import type { AnnotationRenderContext } from './usePdfAnnotations';
+import type { AnnotationRenderContext, AnnotationSource } from './usePdfAnnotations';
+
+export type AnnotationFetcher = (
+  pageNumber: number
+) => Promise<AnnotationSource | OverlayAnnotation[] | null | undefined>
+  | AnnotationSource
+  | OverlayAnnotation[]
+  | null
+  | undefined;
 
 export interface UsePdfMouseLineOptions {
   enabled?: boolean;
   color?: string;
   width?: number;
-  onIntersections?: (context: { x: number; pageNumber: number; overlays: OverlayAnnotation[] }) => void;
+  orientation?: MouseLineOrientation;
+  onIntersections?: (context: MouseLineIntersectionContext) => void;
   tooltips?: boolean | Partial<MouseLineTooltipOptions>;
 }
 
 export interface UsePdfOptions {
   mouseLine?: UsePdfMouseLineOptions;
+  annotationFetcher?: AnnotationFetcher | null;
 }
 
 export function usePdf(
@@ -62,6 +78,9 @@ export function usePdf(
     if (config.width !== undefined) {
       mapped.mouseLineWidth = config.width;
     }
+    if (config.orientation !== undefined) {
+      mapped.orientation = config.orientation;
+    }
     if (config.onIntersections !== undefined) {
       mapped.onMouseLineIntersections = config.onIntersections;
     }
@@ -81,6 +100,9 @@ export function usePdf(
   }
   if (options.mouseLine?.width !== undefined) {
     initialMouseLineOptions.mouseLineWidth = options.mouseLine.width;
+  }
+  if (options.mouseLine?.orientation !== undefined) {
+    initialMouseLineOptions.orientation = options.mouseLine.orientation;
   }
   if (options.mouseLine?.onIntersections) {
     initialMouseLineOptions.onMouseLineIntersections = options.mouseLine.onIntersections;
@@ -121,8 +143,168 @@ export function usePdf(
     selectedAnnotationContent,
     cleanupProviders,
     getAnnotationAtPoint,
-    getAnnotationsIntersectingVerticalLine
+    getAnnotationsIntersectingVerticalLine,
+    getAnnotationsIntersectingHorizontalLine
   } = usePdfAnnotations(canvasRef, htmlOverlayContainer, htmlAnnotation, onOverlayClick);
+
+  const dynamicAnnotationFetcher = ref<AnnotationFetcher | null>(
+    options.annotationFetcher ?? null
+  );
+  const annotationCache = ref<Map<number, OverlayAnnotation[]>>(new Map());
+
+  const updatePageAnnotationsFromCache = () => {
+    if (!annotationCache.value.size) {
+      pageAnnotations.value = [];
+      return;
+    }
+
+    const combined: OverlayAnnotation[] = [];
+    annotationCache.value.forEach((annotations) => {
+      combined.push(...annotations);
+    });
+    pageAnnotations.value = combined;
+  };
+
+  const parsePageNumber = (pageValue: unknown, fallback?: number) => {
+    if (typeof pageValue === 'number' && Number.isFinite(pageValue)) {
+      return Math.trunc(pageValue);
+    }
+
+    if (typeof pageValue === 'string' && pageValue.trim() !== '') {
+      const parsed = Number(pageValue);
+      if (Number.isFinite(parsed)) {
+        return Math.trunc(parsed);
+      }
+    }
+
+    if (fallback !== undefined) {
+      return Math.trunc(fallback);
+    }
+
+    return null;
+  };
+
+  const groupAnnotationsByPage = (
+    annotations: OverlayAnnotation[],
+    fallback?: number
+  ) => {
+    const grouped = new Map<number, OverlayAnnotation[]>();
+
+    for (const annotation of annotations) {
+      const pageNumber = parsePageNumber(annotation.page, fallback);
+      if (pageNumber === null) {
+        continue;
+      }
+
+      if (!grouped.has(pageNumber)) {
+        grouped.set(pageNumber, []);
+      }
+      grouped.get(pageNumber)!.push(annotation);
+    }
+
+    return grouped;
+  };
+
+  const resetAnnotationCache = () => {
+    annotationCache.value.clear();
+    updatePageAnnotationsFromCache();
+  };
+
+  const replaceAnnotationCache = (annotations: OverlayAnnotation[]) => {
+    annotationCache.value.clear();
+
+    const grouped = groupAnnotationsByPage(annotations);
+    grouped.forEach((list, page) => {
+      annotationCache.value.set(page, list);
+    });
+
+    updatePageAnnotationsFromCache();
+  };
+
+  const upsertAnnotations = (
+    annotations: OverlayAnnotation[],
+    fallbackPage?: number
+  ) => {
+    const grouped = groupAnnotationsByPage(annotations, fallbackPage);
+    if (!grouped.size && fallbackPage !== undefined) {
+      annotationCache.value.set(fallbackPage, []);
+      updatePageAnnotationsFromCache();
+      return;
+    }
+
+    grouped.forEach((list, page) => {
+      annotationCache.value.set(page, list);
+    });
+
+    updatePageAnnotationsFromCache();
+  };
+
+  const cloneAnnotationsForWorker = (annotations: OverlayAnnotation[]) => {
+    const raw = toRaw(annotations);
+
+    if (typeof structuredClone === 'function') {
+      try {
+        return structuredClone(raw);
+      } catch (error) {
+        console.warn('[PDF Loading] structuredClone failed, falling back to JSON serialization:', error);
+      }
+    }
+
+    return raw.map((annotation) => {
+      const plain = JSON.parse(JSON.stringify(annotation)) as OverlayAnnotation;
+      return plain;
+    });
+  };
+
+  const setAnnotationFetcher = (fetcher?: AnnotationFetcher | null) => {
+    dynamicAnnotationFetcher.value = fetcher ?? null;
+    resetAnnotationCache();
+  };
+
+  const fetchAnnotationsForPage = async (
+    pageNumber: number,
+    { force = false }: { force?: boolean } = {}
+  ): Promise<OverlayAnnotation[]> => {
+    const pageKey = pageNumber + 1;
+
+    if (!force && annotationCache.value.has(pageKey)) {
+      return annotationCache.value.get(pageKey) ?? [];
+    }
+
+    if (!dynamicAnnotationFetcher.value) {
+      if (!annotationCache.value.has(pageKey)) {
+        annotationCache.value.set(pageKey, []);
+        updatePageAnnotationsFromCache();
+      }
+      return annotationCache.value.get(pageKey) ?? [];
+    }
+
+    try {
+      const result = await dynamicAnnotationFetcher.value(pageKey);
+
+      if (!result) {
+        annotationCache.value.set(pageKey, []);
+        updatePageAnnotationsFromCache();
+        return [];
+      }
+
+      const annotations = await loadAnnotations(result, { defaultPage: pageKey });
+      upsertAnnotations(annotations, pageKey);
+      return annotationCache.value.get(pageKey) ?? annotations;
+    } catch (err) {
+      console.error(`[PDF Annotations] Failed to fetch annotations for page ${pageKey}:`, err);
+      annotationCache.value.set(pageKey, []);
+      updatePageAnnotationsFromCache();
+      return [];
+    }
+  };
+
+  const refreshAnnotationsForPage = async (pageNumber: number) => {
+    const pageKey = pageNumber + 1;
+    annotationCache.value.delete(pageKey);
+    updatePageAnnotationsFromCache();
+    return fetchAnnotationsForPage(pageNumber, { force: true });
+  };
 
   // Format PDF date strings
   const formatPdfDate = (dateStr: string) => {
@@ -138,17 +320,29 @@ export function usePdf(
   };
 
   // Load PDF document with annotations
-  const loadPdf = async (file: string, docId: string) => {
+  const loadPdf = async (
+    file: string,
+    annotationSource: AnnotationSource | null | undefined
+  ) => {
     if (!file) return;
-    
+
     clearAnnotations();
-    
+    resetAnnotationCache();
+
     // Initialize simple coordinate system (no external dependencies)
     console.log('[PDF Loading] Initializing simple coordinate system');
     initializePdfCoordinates();
-    
-    // Load annotations using the composable
-    await loadAnnotations(docId);
+
+    if (!annotationSource) {
+      if (!dynamicAnnotationFetcher.value) {
+        console.warn('[PDF Loading] No annotation source provided, skipping overlay load');
+      }
+      pageAnnotations.value = [];
+    } else {
+      // Load annotations using the composable
+      const annotations = await loadAnnotations(annotationSource);
+      replaceAnnotationCache(annotations);
+    }
     
     console.log('Loading PDF:', file);
     isLoading.value = true;
@@ -160,7 +354,8 @@ export function usePdf(
       const arrayBuffer = await response.arrayBuffer();
       console.log('PDF arrayBuffer size:', arrayBuffer.byteLength);
       
-      await loadDocument(arrayBuffer, toRaw(pageAnnotations.value));
+      const workerAnnotations = cloneAnnotationsForWorker(pageAnnotations.value);
+      await loadDocument(arrayBuffer, workerAnnotations);
       console.log('PDF document loaded');
       pdfDocument.value = true;
           
@@ -186,6 +381,10 @@ export function usePdf(
   // Display page with annotations
   const displayPage = async (pageNumber: number) => {
     console.log('Displaying page:', pageNumber, 'Canvas available:', !!canvasRef.value);
+
+    await fetchAnnotationsForPage(pageNumber).catch((err) => {
+      console.error(`[PDF Rendering] Unable to ensure annotations for page ${pageNumber + 1}:`, err);
+    });
     
     // Clear previous page's annotations
     clearAnnotations();
@@ -338,6 +537,7 @@ export function usePdf(
       drawHoverEffect,
       clearHtmlOverlays,
       getAnnotationsIntersectingVerticalLine,
+      getAnnotationsIntersectingHorizontalLine,
       htmlOverlayContainer
     },
     initialMouseLineOptions
@@ -373,6 +573,7 @@ export function usePdf(
     metadata.value = { format: '', modDate: '', author: '' };
     cleanupPageUrls();
     clearAnnotations();
+    resetAnnotationCache();
     clearOverlayCanvas();
     resetMouseLinePayload();
   };
@@ -419,6 +620,9 @@ export function usePdf(
     handleCanvasMouseLeave,
     setMouseLineOptions,
     clearOverlayCanvas,
+    fetchAnnotationsForPage,
+    refreshAnnotationsForPage,
+    setAnnotationFetcher,
     cleanup,
     cleanupPageUrls,
 

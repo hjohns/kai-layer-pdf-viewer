@@ -4,7 +4,7 @@
 - PDF viewer uses `OverlayAnnotation` interface from `types/annotations.ts`
 - Annotations loaded via `loadAnnotations()` in `composables/usePdfAnnotations.ts`
 - Current format expects `{overlay: [...]}` JSON structure with `page`, `content`, `rect`, `line` properties
-- `PDFViewer.vue` component accepts `overlays` prop (path to annotation file)
+- `PDFViewer.vue` component accepts `overlays` (path to annotation file), `overlaysData` (inline JSON/JSON-LD object), or an `annotationFetcher` function for per-page loading
 - Click handlers emit overlay click events with annotation data including IRIs when available
 
 ## New JSONLD Format Analysis:

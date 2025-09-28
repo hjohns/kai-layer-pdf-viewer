@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { OverlayAnnotation } from '@/types/annotations';
+import type { MouseLineIntersectionContext } from '@/composables/useMouseGuide';
 
 const { addLog } = useLog();
 const pdfViewerRef = ref();
@@ -28,7 +29,11 @@ const handleCanvasClick = (context: { x: number, y: number, pageNumber: number }
   addLog(`Canvas clicked at (${context.x.toFixed(1)}, ${context.y.toFixed(1)})`);
 };
 
-const handleMouseLineIntersections = (context: { x: number, pageNumber: number, overlays: OverlayAnnotation[] }) => {
+const handleMouseLineIntersections = (context: MouseLineIntersectionContext) => {
+  if (context.orientation !== 'vertical') {
+    return;
+  }
+
   const ids = context.overlays.map(annotation => annotation['@id'] || `${annotation.page}-${annotation.line}`);
   const hasChanged = ids.length !== lastIntersectedIds.value.length ||
     ids.some((id, index) => id !== lastIntersectedIds.value[index]);

@@ -102,3 +102,35 @@ export const getAnnotationsIntersectingVerticalLine = (
 
   return intersections;
 };
+
+export const getAnnotationsIntersectingHorizontalLine = (
+  annotationPathValues: Iterable<AnnotationPathData>,
+  y: number,
+  ctx: CanvasRenderingContext2D
+) => {
+  const intersections: OverlayAnnotation[] = [];
+
+  for (const { path, annotation, bounds } of annotationPathValues) {
+    if (y < bounds.minY || y > bounds.maxY) {
+      continue;
+    }
+
+    const sampleCount = Math.max(1, Math.ceil(bounds.width / 8));
+    const step = bounds.width / sampleCount;
+    let intersects = false;
+
+    for (let i = 0; i <= sampleCount; i++) {
+      const x = bounds.minX + step * i;
+      if (ctx.isPointInPath(path, x, y)) {
+        intersects = true;
+        break;
+      }
+    }
+
+    if (intersects) {
+      intersections.push(annotation);
+    }
+  }
+
+  return intersections;
+};

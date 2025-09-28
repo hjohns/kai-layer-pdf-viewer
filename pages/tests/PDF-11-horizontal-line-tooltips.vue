@@ -5,7 +5,7 @@ import type { MouseLineIntersectionContext } from '@/composables/useMouseGuide';
 const { addLog } = useLog();
 const pdfViewerRef = ref();
 const intersectingOverlays = ref<OverlayAnnotation[]>([]);
-const mouseLineX = ref<number | null>(null);
+const mouseLineY = ref<number | null>(null);
 const lastIntersectedIds = ref<string[]>([]);
 
 // Handle overlay click events - show IRI and semantic data
@@ -30,7 +30,7 @@ const handleCanvasClick = (context: { x: number, y: number, pageNumber: number }
 };
 
 const handleMouseLineIntersections = (context: MouseLineIntersectionContext) => {
-  if (context.orientation !== 'vertical') {
+  if (context.orientation !== 'horizontal') {
     return;
   }
 
@@ -39,10 +39,10 @@ const handleMouseLineIntersections = (context: MouseLineIntersectionContext) => 
     ids.some((id, index) => id !== lastIntersectedIds.value[index]);
 
   intersectingOverlays.value = context.overlays;
-  const normalizedX = Number.isFinite(context.x) ? context.x : null;
-  mouseLineX.value = normalizedX;
+  const normalizedY = Number.isFinite(context.y) ? context.y : null;
+  mouseLineY.value = normalizedY;
 
-  if (normalizedX === null) {
+  if (normalizedY === null) {
     lastIntersectedIds.value = ids;
     return;
   }
@@ -51,10 +51,10 @@ const handleMouseLineIntersections = (context: MouseLineIntersectionContext) => 
     lastIntersectedIds.value = ids;
 
     if (ids.length) {
-      addLog(`📐 Line at x=${normalizedX.toFixed(1)} intersects ${ids.length} overlay(s)`);
+      addLog(`📐 Line at y=${normalizedY.toFixed(1)} intersects ${ids.length} overlay(s)`);
       context.overlays.forEach(annotation => addLog(`   • ${annotation.content}`));
     } else {
-      addLog(`📐 Line at x=${normalizedX.toFixed(1)} intersects no overlays`);
+      addLog(`📐 Line at y=${normalizedY.toFixed(1)} intersects no overlays`);
     }
     addLog('─'.repeat(50));
   }
@@ -77,8 +77,8 @@ onMounted(() => {
 
 <template>
   <TestPanel
-    heading="PDF 10 Vertical Line Intersections"
-    description="Drop a vertical guide line under the cursor to see which overlay polygons it intersects and surface their text content."
+    heading="PDF 11 Horizontal Line Tooltips"
+    description="Inspect intersected annotations with on-canvas tooltips while scanning with a horizontal guide line."
   >
     <PDFViewer
       ref="pdfViewerRef"
@@ -86,16 +86,16 @@ onMounted(() => {
       overlays="/pdf-tests/page-8-table-overlay.jsonld"
       @overlay-click="handleOverlayClick"
       @canvas-click="handleCanvasClick"
-      :mouse-line="{ enabled: true, color: 'rgba(249, 115, 22, 0.8)', width: 2 }"
+      :mouse-line="{ enabled: true, color: 'rgba(249, 115, 22, 0.8)', width: 2, tooltips: true, orientation: 'horizontal' }"
       @mouse-line-intersections="handleMouseLineIntersections"
     />
     <div class="mt-4 space-y-2">
       <p class="text-sm text-muted-foreground">
-        <template v-if="mouseLineX !== null">
-          Vertical line at x={{ mouseLineX.toFixed(1) }} intersects {{ intersectingOverlays.length }} overlay(s).
+        <template v-if="mouseLineY !== null">
+          Horizontal line at y={{ mouseLineY.toFixed(1) }} intersects {{ intersectingOverlays.length }} overlay(s).
         </template>
         <template v-else>
-          Move the mouse over the PDF to inspect overlays with the vertical guide.
+          Move the mouse over the PDF to inspect overlays with the horizontal guide.
         </template>
       </p>
       <ul v-if="intersectingOverlays.length" class="list-disc pl-5 text-sm leading-6">

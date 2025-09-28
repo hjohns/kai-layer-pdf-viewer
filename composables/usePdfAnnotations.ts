@@ -6,7 +6,8 @@ import type { AnnotationPathData } from './useAnnotationGeometry';
 import {
   convertCoordinates,
   createAnnotationPath,
-  getAnnotationsIntersectingVerticalLine
+  getAnnotationsIntersectingVerticalLine,
+  getAnnotationsIntersectingHorizontalLine
 } from './useAnnotationGeometry';
 import { getConfidenceColors } from './useAnnotationStyling';
 
@@ -68,6 +69,14 @@ export type HtmlOverlayFunction = (
   annotation: OverlayAnnotation,
   context: AnnotationRenderContext
 ) => HtmlOverlayResult | null;
+
+export type AnnotationSource =
+  | string
+  | OverlayAnnotation[]
+  | {
+      url?: string | null;
+      data?: unknown;
+    };
 
 // Global singleton state
 const globalAnnotationProviders = ref<Map<string, AnnotationProvider>>(new Map());
@@ -178,25 +187,123 @@ export function usePdfAnnotations(
 });
 };
 
-// Load annotations from JSON or JSONLD file
-const loadAnnotations = async (docId: string) => {
+  const resolveAnnotationData = async (source: AnnotationSource | null | undefined) => {
+    if (!source) {
+      return null;
+    }
+
     try {
-      const response = await fetch(docId);
-      const data = await response.json();
+      if (typeof source === 'string') {
+        if (!source) {
+          return null;
+        }
+
+        const response = await fetch(source);
+        if (!response.ok) {
+          throw new Error(`Failed to load annotations from ${source}: ${response.status}`);
+        }
+        return await response.json();
+      }
+
+      if (Array.isArray(source)) {
+        return source;
+      }
+
+      if (source.data !== undefined) {
+        return await Promise.resolve(source.data);
+      }
+
+      if (source.url) {
+        const response = await fetch(source.url);
+        if (!response.ok) {
+          throw new Error(`Failed to load annotations from ${source.url}: ${response.status}`);
+        }
+        return await response.json();
+      }
+
+      if (typeof source === 'object') {
+        return source;
+      }
+    } catch (error) {
+      console.error('[PDF Annotations] Error resolving annotation data:', error);
+      throw error;
+    }
+
+    return null;
+  };
+
+  const normalizeAnnotationPages = (annotations: OverlayAnnotation[], defaultPage?: number) => {
+    const fallback = defaultPage !== undefined ? defaultPage.toString() : undefined;
+
+    return annotations.map((annotation, index) => {
+      const pageValue = annotation.page ?? fallback;
+      const normalizedPage = (() => {
+        if (typeof pageValue === 'number') {
+          return pageValue.toString();
+        }
+        if (typeof pageValue === 'string') {
+          return pageValue;
+        }
+        return fallback ?? '';
+      })();
+
+      // Provide a stable line number if absent to retain overlay ordering
+      const normalizedLine =
+        annotation.line !== undefined ? annotation.line : index;
+
+      return {
+        ...annotation,
+        page: normalizedPage,
+        line: normalizedLine
+      } as OverlayAnnotation;
+    });
+  };
+
+  // Load annotations from JSON or JSONLD file
+  const loadAnnotations = async (
+    source: AnnotationSource | null | undefined,
+    options?: { defaultPage?: number }
+  ): Promise<OverlayAnnotation[]> => {
+    try {
+      const rawData = await resolveAnnotationData(source);
+
+      if (!rawData) {
+        console.warn('[PDF Annotations] No annotation data provided, clearing overlays');
+        pageAnnotations.value = [];
+        return [];
+      }
+
+      const data: any = rawData;
 
       if (isJsonLD(data)) {
         // Handle JSONLD format
-        pageAnnotations.value = transformJsonLDToOverlay(data);
+        pageAnnotations.value = transformJsonLDToOverlay(
+          data,
+          options?.defaultPage !== undefined ? options.defaultPage.toString() : undefined
+        );
         console.log('Loaded JSONLD annotations:', pageAnnotations.value.length);
-        console.log('Sample annotation:', pageAnnotations.value[0]);
+        if (pageAnnotations.value.length) {
+          console.log('Sample annotation:', pageAnnotations.value[0]);
+        }
       } else {
         // Handle traditional JSON format
-        pageAnnotations.value = data?.overlay || [];
+        if (Array.isArray(data)) {
+          pageAnnotations.value = data;
+        } else {
+          pageAnnotations.value = data?.overlay || [];
+        }
         console.log('Loaded JSON annotations:', pageAnnotations.value.length);
       }
+
+      if (pageAnnotations.value.length) {
+        pageAnnotations.value = normalizeAnnotationPages(pageAnnotations.value, options?.defaultPage);
+      }
+
+      return pageAnnotations.value;
     } catch (error) {
       console.error('Error loading annotations:', error);
       pageAnnotations.value = [];
+      return [];
     }
   };
   
@@ -260,6 +367,10 @@ const loadAnnotations = async (docId: string) => {
 
   const findAnnotationsIntersectingVerticalLine = (x: number, ctx: CanvasRenderingContext2D) => {
     return getAnnotationsIntersectingVerticalLine(annotationPaths.value.values(), x, ctx);
+  };
+
+  const findAnnotationsIntersectingHorizontalLine = (y: number, ctx: CanvasRenderingContext2D) => {
+    return getAnnotationsIntersectingHorizontalLine(annotationPaths.value.values(), y, ctx);
   };
 
   // Handle annotation click (legacy - kept for backward compatibility)
@@ -971,6 +1082,7 @@ const loadAnnotations = async (docId: string) => {
     drawAnnotations,
     getAnnotationAtPoint,
     getAnnotationsIntersectingVerticalLine: findAnnotationsIntersectingVerticalLine,
+    getAnnotationsIntersectingHorizontalLine: findAnnotationsIntersectingHorizontalLine,
     handleAnnotationClick,
     showAnnotationDialog,
     handleAnnotationHover,

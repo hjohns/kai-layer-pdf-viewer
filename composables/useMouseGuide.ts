@@ -3,6 +3,16 @@ import type { Ref } from 'vue';
 import type { OverlayAnnotation } from '@/types/annotations';
 import { convertCoordinates } from './useAnnotationGeometry';
 
+export type MouseLineOrientation = 'vertical' | 'horizontal';
+
+export interface MouseLineIntersectionContext {
+  x: number;
+  y: number;
+  pageNumber: number;
+  overlays: OverlayAnnotation[];
+  orientation: MouseLineOrientation;
+}
+
 export interface MouseLineTooltipOptions {
   enabled: boolean;
   offset?: number;
@@ -14,7 +24,8 @@ export interface MouseLineOptions {
   enableMouseLine: boolean;
   mouseLineColor: string;
   mouseLineWidth: number;
-  onMouseLineIntersections?: (context: { x: number; pageNumber: number; overlays: OverlayAnnotation[] }) => void;
+  orientation: MouseLineOrientation;
+  onMouseLineIntersections?: (context: MouseLineIntersectionContext) => void;
   tooltip: MouseLineTooltipOptions;
 }
 
@@ -28,6 +39,7 @@ interface MouseGuideDependencies {
   drawHoverEffect: (ctx: CanvasRenderingContext2D, x: number, y: number, effectiveDpi: number) => Promise<void>;
   clearHtmlOverlays: () => void;
   getAnnotationsIntersectingVerticalLine: (x: number, ctx: CanvasRenderingContext2D) => OverlayAnnotation[];
+  getAnnotationsIntersectingHorizontalLine: (y: number, ctx: CanvasRenderingContext2D) => OverlayAnnotation[];
 }
 
 const DEFAULT_MOUSE_LINE_COLOR = 'rgba(59, 130, 246, 0.65)';
@@ -47,9 +59,11 @@ const TOOLTIP_ITEM_CLASS = 'pdf-mouse-line-tooltip';
 interface TooltipEntry {
   id: string;
   overlay: OverlayAnnotation;
+  orientation: MouseLineOrientation;
   left: number;
   top: number;
-  rightEdge: number;
+  rightEdge?: number;
+  maxWidth?: number;
 }
 
 export function useMouseGuide(
@@ -65,16 +79,24 @@ export function useMouseGuide(
     enableMouseLine: initialOptions?.enableMouseLine ?? false,
     mouseLineColor: initialOptions?.mouseLineColor ?? DEFAULT_MOUSE_LINE_COLOR,
     mouseLineWidth: initialOptions?.mouseLineWidth ?? DEFAULT_MOUSE_LINE_WIDTH,
+    orientation: initialOptions?.orientation ?? 'vertical',
     onMouseLineIntersections: initialOptions?.onMouseLineIntersections,
     tooltip: initialTooltipOptions
   });
 
   const previousHoverState = ref(false);
   const previousHoveredAnnotation = ref<OverlayAnnotation | null>(null);
-  const previousMouseLinePayload = ref<{ pageNumber: number; x: number; overlayIds: string[] } | null>(null);
+  const previousMouseLinePayload = ref<{
+    pageNumber: number;
+    x: number;
+    y: number;
+    orientation: MouseLineOrientation;
+    overlayIds: string[];
+  } | null>(null);
   const tooltipHost = shallowRef<HTMLElement | null>(null);
 
   const mouseLineEnabled = computed(() => options.value.enableMouseLine);
+  const mouseLineOrientation = computed<MouseLineOrientation>(() => options.value.orientation ?? 'vertical');
   const tooltipOptions = computed<MouseLineTooltipOptions>(() => ({
     ...DEFAULT_TOOLTIP_OPTIONS,
     ...(options.value.tooltip ?? DEFAULT_TOOLTIP_OPTIONS)
@@ -133,44 +155,61 @@ export function useMouseGuide(
         }
       : options.value.tooltip;
 
+    const nextOrientation = nextOptions.orientation ?? options.value.orientation;
+    const orientationChanged = nextOrientation !== options.value.orientation;
+
     options.value = {
       ...options.value,
       ...nextOptions,
+      orientation: nextOrientation,
       tooltip: nextTooltip
     };
+
+    if (orientationChanged) {
+      previousMouseLinePayload.value = null;
+      clearTooltipHost(true);
+    }
 
     if (!options.value.tooltip.enabled) {
       clearTooltipHost(true);
     }
   };
 
-  const emitMouseLineIntersections = (payload: { x: number; overlays: OverlayAnnotation[] }) => {
+  const emitMouseLineIntersections = (payload: { x: number; y: number; overlays: OverlayAnnotation[] }) => {
     const handler = options.value.onMouseLineIntersections;
     if (!handler) {
       return;
     }
 
     const overlayIds = payload.overlays.map(annotation => annotation['@id'] || `${annotation.page}-${annotation.line}`);
-    const roundedX = Number(payload.x.toFixed(2));
+    const normalizedX = Number.isFinite(payload.x) ? Number(payload.x.toFixed(2)) : Number.NaN;
+    const normalizedY = Number.isFinite(payload.y) ? Number(payload.y.toFixed(2)) : Number.NaN;
+    const orientation = mouseLineOrientation.value;
     const previousPayload = previousMouseLinePayload.value;
 
     const hasChanged = !previousPayload ||
       previousPayload.pageNumber !== deps.currentPage.value ||
       previousPayload.overlayIds.length !== overlayIds.length ||
       overlayIds.some((id, index) => id !== previousPayload.overlayIds[index]) ||
-      previousPayload.x !== roundedX;
+      previousPayload.x !== normalizedX ||
+      previousPayload.y !== normalizedY ||
+      previousPayload.orientation !== orientation;
 
     if (hasChanged) {
       previousMouseLinePayload.value = {
         pageNumber: deps.currentPage.value,
-        x: roundedX,
+        x: normalizedX,
+        y: normalizedY,
+        orientation,
         overlayIds
       };
 
       handler({
         x: payload.x,
+        y: payload.y,
         pageNumber: deps.currentPage.value,
-        overlays: payload.overlays
+        overlays: payload.overlays,
+        orientation
       });
     }
   };
@@ -221,6 +260,7 @@ export function useMouseGuide(
     const tooltipHalfHeight = (tooltipOptions.value.estimatedHeight ?? DEFAULT_TOOLTIP_ESTIMATED_HEIGHT) / 2;
 
     const entries: TooltipEntry[] = [];
+    const orientation = mouseLineOrientation.value;
 
     for (const overlay of overlays) {
       const rect = overlay.rect || [];
@@ -247,63 +287,92 @@ export function useMouseGuide(
 
       const id = overlay['@id'] || `${overlay.page}-${overlay.line}`;
 
-      const displayRightEdge = maxX * scaleX;
-      const displayCenterY = (minY + (maxY - minY) / 2) * scaleY;
+      if (orientation === 'vertical') {
+        const displayRightEdge = maxX * scaleX;
+        const displayCenterY = (minY + (maxY - minY) / 2) * scaleY;
 
-      entries.push({
-        id,
-        overlay,
-        left: displayRightEdge,
-        top: displayCenterY,
-        rightEdge: displayRightEdge
-      });
+        entries.push({
+          id,
+          overlay,
+          orientation,
+          left: displayRightEdge,
+          top: displayCenterY,
+          rightEdge: displayRightEdge
+        });
+      } else {
+        const displayBottomEdge = maxY * scaleY;
+        const displayCenterX = (minX + (maxX - minX) / 2) * scaleX;
+        const overlayWidth = (maxX - minX) * scaleX;
+
+        if (!Number.isFinite(displayCenterX) || !Number.isFinite(displayBottomEdge) || overlayWidth <= 0) {
+          continue;
+        }
+
+        const halfWidth = overlayWidth / 2;
+        const clampedCenter = (() => {
+          const minCenter = halfWidth;
+          const maxCenter = Math.max(minCenter, overlayBounds.width - halfWidth);
+          return Math.min(Math.max(displayCenterX, minCenter), maxCenter);
+        })();
+
+        entries.push({
+          id,
+          overlay,
+          orientation,
+          left: clampedCenter,
+          top: displayBottomEdge + tooltipOffset,
+          maxWidth: overlayWidth
+        });
+      }
     }
 
     if (!entries.length) {
       return [];
     }
 
-    const maxRightEdge = Math.max(...entries.map(entry => entry.rightEdge));
+    if (orientation === 'vertical') {
+      const maxRightEdge = Math.max(...entries.map(entry => entry.rightEdge!));
 
-    entries.sort((a, b) => a.top - b.top);
+      entries.sort((a, b) => a.top - b.top);
 
-    const minCenter = tooltipHalfHeight;
-    const maxCenter = Math.max(minCenter, overlayBounds.height - tooltipHalfHeight);
+      const minCenter = tooltipHalfHeight;
+      const maxCenter = Math.max(minCenter, overlayBounds.height - tooltipHalfHeight);
 
-    const adjustedCenters: number[] = [];
+      const adjustedCenters: number[] = [];
 
-    entries.forEach((entry, index) => {
-      const desired = Math.min(Math.max(entry.top, minCenter), maxCenter);
-      if (index === 0) {
-        adjustedCenters.push(desired);
-        return;
+      entries.forEach((entry, index) => {
+        const desired = Math.min(Math.max(entry.top, minCenter), maxCenter);
+        if (index === 0) {
+          adjustedCenters.push(desired);
+          return;
+        }
+
+        const previousCenter = adjustedCenters[index - 1];
+        const minimumAllowed = previousCenter + tooltipGap;
+        adjustedCenters.push(Math.max(desired, minimumAllowed));
+      });
+
+      const lastCenter = adjustedCenters[adjustedCenters.length - 1];
+      if (lastCenter > maxCenter) {
+        const shiftDown = lastCenter - maxCenter;
+        for (let i = 0; i < adjustedCenters.length; i++) {
+          adjustedCenters[i] = Math.max(minCenter, adjustedCenters[i] - shiftDown);
+        }
       }
 
-      const previousCenter = adjustedCenters[index - 1];
-      const minimumAllowed = previousCenter + tooltipGap;
-      adjustedCenters.push(Math.max(desired, minimumAllowed));
-    });
-
-    const lastCenter = adjustedCenters[adjustedCenters.length - 1];
-    if (lastCenter > maxCenter) {
-      const shiftDown = lastCenter - maxCenter;
-      for (let i = 0; i < adjustedCenters.length; i++) {
-        adjustedCenters[i] = Math.max(minCenter, adjustedCenters[i] - shiftDown);
+      const firstCenter = adjustedCenters[0];
+      if (firstCenter < minCenter) {
+        const shiftUp = minCenter - firstCenter;
+        for (let i = 0; i < adjustedCenters.length; i++) {
+          adjustedCenters[i] = Math.min(maxCenter, adjustedCenters[i] + shiftUp);
+        }
       }
+
+      entries.forEach((entry, index) => {
+        entry.top = adjustedCenters[index];
+        entry.left = maxRightEdge + tooltipOffset;
+      });
     }
-
-    const firstCenter = adjustedCenters[0];
-    if (firstCenter < minCenter) {
-      const shiftUp = minCenter - firstCenter;
-      for (let i = 0; i < adjustedCenters.length; i++) {
-        adjustedCenters[i] = Math.min(maxCenter, adjustedCenters[i] + shiftUp);
-      }
-    }
-
-    entries.forEach((entry, index) => {
-      entry.top = adjustedCenters[index];
-      entry.left = maxRightEdge + tooltipOffset;
-    });
 
     return entries;
   };
@@ -345,13 +414,14 @@ export function useMouseGuide(
       wrapper.style.pointerEvents = 'none';
       wrapper.style.left = `${entry.left}px`;
       wrapper.style.top = `${entry.top}px`;
-      wrapper.style.transform = 'translateY(-50%)';
+      if (entry.orientation === 'vertical') {
+        wrapper.style.transform = 'translateY(-50%)';
+      } else {
+        wrapper.style.transform = 'translate(-50%, 0)';
+      }
 
       const content = document.createElement('div');
       content.className = contentClass;
-      content.style.display = 'inline-flex';
-      content.style.alignItems = 'center';
-      content.style.gap = '12px';
       content.style.padding = '8px 16px';
       content.style.borderRadius = '8px';
       content.style.background = 'rgba(15, 23, 42, 0.85)';
@@ -360,11 +430,31 @@ export function useMouseGuide(
       content.style.fontWeight = '600';
       content.style.border = '1px solid rgba(255, 255, 255, 0.1)';
       content.style.boxShadow = '0 8px 20px rgba(15, 23, 42, 0.3)';
-      content.style.whiteSpace = 'nowrap';
+
+      if (entry.orientation === 'vertical') {
+        content.style.display = 'inline-flex';
+        content.style.alignItems = 'center';
+        content.style.flexDirection = 'row';
+        content.style.gap = '12px';
+        content.style.whiteSpace = 'nowrap';
+      } else {
+        content.style.display = 'flex';
+        content.style.alignItems = 'flex-start';
+        content.style.flexDirection = 'column';
+        content.style.gap = '8px';
+        content.style.whiteSpace = 'normal';
+        content.style.wordBreak = 'break-word';
+        content.style.boxSizing = 'border-box';
+        const maxWidth = entry.maxWidth ?? 0;
+        content.style.maxWidth = maxWidth > 0 ? `${maxWidth}px` : '200px';
+      }
 
       const label = document.createElement('span');
       label.className = labelClass;
-      label.style.whiteSpace = 'nowrap';
+      label.style.whiteSpace = entry.orientation === 'vertical' ? 'nowrap' : 'normal';
+      if (entry.orientation === 'horizontal') {
+        label.style.display = 'block';
+      }
       label.textContent = entry.overlay.content || '';
       content.appendChild(label);
 
@@ -372,12 +462,16 @@ export function useMouseGuide(
       if (metaText) {
         const meta = document.createElement('span');
         meta.className = metaClass;
-        meta.style.whiteSpace = 'nowrap';
         meta.style.fontSize = '10px';
         meta.style.fontWeight = '400';
         meta.style.letterSpacing = '0.08em';
         meta.style.textTransform = 'uppercase';
         meta.style.opacity = '0.75';
+        meta.style.whiteSpace = entry.orientation === 'vertical' ? 'nowrap' : 'normal';
+        if (entry.orientation === 'horizontal') {
+          meta.style.display = 'block';
+          meta.style.marginTop = '-2px';
+        }
         meta.textContent = metaText;
         content.appendChild(meta);
       }
@@ -409,6 +503,7 @@ export function useMouseGuide(
 
     const x = (event.clientX - rect.left) * scaleX;
     const y = (event.clientY - rect.top) * scaleY;
+    const orientation = mouseLineOrientation.value;
 
     const isOverAnnotation = deps.handleAnnotationHover(x, y, overlayCtx);
     const currentAnnotation = isOverAnnotation ? deps.getAnnotationAtPoint(x, y, overlayCtx) : null;
@@ -435,19 +530,28 @@ export function useMouseGuide(
       }
 
       if (mouseLineEnabled.value) {
-        intersections = deps.getAnnotationsIntersectingVerticalLine(x, overlayCtx);
+        intersections = orientation === 'vertical'
+          ? deps.getAnnotationsIntersectingVerticalLine(x, overlayCtx)
+          : deps.getAnnotationsIntersectingHorizontalLine(y, overlayCtx);
 
         overlayCtx.save();
         overlayCtx.strokeStyle = options.value.mouseLineColor;
         overlayCtx.lineWidth = options.value.mouseLineWidth;
         overlayCtx.beginPath();
-        overlayCtx.moveTo(x, 0);
-        overlayCtx.lineTo(x, overlayCanvas.height);
+        if (orientation === 'vertical') {
+          overlayCtx.moveTo(x, 0);
+          overlayCtx.lineTo(x, overlayCanvas.height);
+        } else {
+          overlayCtx.moveTo(0, y);
+          overlayCtx.lineTo(overlayCanvas.width, y);
+        }
         overlayCtx.stroke();
         overlayCtx.restore();
       }
     } else if (mouseLineEnabled.value) {
-      intersections = deps.getAnnotationsIntersectingVerticalLine(x, overlayCtx);
+      intersections = orientation === 'vertical'
+        ? deps.getAnnotationsIntersectingVerticalLine(x, overlayCtx)
+        : deps.getAnnotationsIntersectingHorizontalLine(y, overlayCtx);
     }
 
     previousHoverState.value = isOverAnnotation;
@@ -461,7 +565,9 @@ export function useMouseGuide(
     }
 
     if (!shouldRedraw && !intersections.length) {
-      intersections = deps.getAnnotationsIntersectingVerticalLine(x, overlayCtx);
+      intersections = orientation === 'vertical'
+        ? deps.getAnnotationsIntersectingVerticalLine(x, overlayCtx)
+        : deps.getAnnotationsIntersectingHorizontalLine(y, overlayCtx);
     }
 
     if (tooltipOptions.value.enabled) {
@@ -472,7 +578,7 @@ export function useMouseGuide(
       }
     }
 
-    emitMouseLineIntersections({ x, overlays: intersections });
+    emitMouseLineIntersections({ x, y, overlays: intersections });
   };
 
   const handleMouseLeave = (event: MouseEvent) => {
@@ -512,8 +618,10 @@ export function useMouseGuide(
       resetMouseLinePayload();
       options.value.onMouseLineIntersections?.({
         x: Number.NaN,
+        y: Number.NaN,
         pageNumber: deps.currentPage.value,
-        overlays: []
+        overlays: [],
+        orientation: mouseLineOrientation.value
       });
     }
   };

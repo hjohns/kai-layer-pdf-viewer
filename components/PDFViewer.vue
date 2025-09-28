@@ -88,12 +88,17 @@
   </template>
   
   <script setup lang="ts">
-  import { watch, onMounted, onBeforeUnmount } from "vue";  
-  import { usePdf } from '@/composables/usePdf';
-  
-  import type { OverlayAnnotation } from '@/types/annotations';
-import type { AnnotationRenderContext } from '@/composables/usePdfAnnotations';
-import type { MouseLineTooltipOptions } from '@/composables/useMouseGuide';
+import { watch, onMounted, onBeforeUnmount } from "vue";  
+import { usePdf } from '@/composables/usePdf';
+
+import type { OverlayAnnotation } from '@/types/annotations';
+import type { AnnotationRenderContext, AnnotationSource } from '@/composables/usePdfAnnotations';
+import type { AnnotationFetcher } from '@/composables/usePdf';
+import type {
+  MouseLineTooltipOptions,
+  MouseLineIntersectionContext,
+  MouseLineOrientation
+} from '@/composables/useMouseGuide';
 
 type MouseLineTooltipProp = boolean | ({ enabled?: boolean } & Partial<Omit<MouseLineTooltipOptions, 'enabled'>>);
 
@@ -101,11 +106,14 @@ interface MouseLinePropConfig {
   enabled?: boolean;
   color?: string;
   width?: number;
+  orientation?: MouseLineOrientation;
   tooltips?: MouseLineTooltipProp;
 }
 
 const props = defineProps<{ 
-  overlays: string | null, 
+  overlays?: string | null, 
+  overlaysData?: unknown,
+  annotationFetcher?: AnnotationFetcher | null,
   file: string,
   htmlAnnotation?: (context: AnnotationRenderContext, annotation: OverlayAnnotation) => string,
   mouseLine?: MouseLinePropConfig
@@ -115,15 +123,16 @@ const props = defineProps<{
 const emit = defineEmits<{
   'overlay-click': [overlay: OverlayAnnotation, context: { x: number, y: number, pageNumber: number }]
     'canvas-click': [event: { x: number, y: number, pageNumber: number }]
-    'mouse-line-intersections': [context: { x: number; pageNumber: number; overlays: OverlayAnnotation[] }]
+    'mouse-line-intersections': [context: MouseLineIntersectionContext]
 }>();
 
 const toMouseLineOptions = (config?: MouseLinePropConfig) => ({
   enabled: config?.enabled ?? false,
   color: config?.color ?? 'rgba(59, 130, 246, 0.65)',
   width: config?.width ?? 1.5,
+  orientation: config?.orientation ?? 'vertical',
   tooltips: config?.tooltips,
-  onIntersections: (context: { x: number; pageNumber: number; overlays: OverlayAnnotation[] }) => {
+  onIntersections: (context: MouseLineIntersectionContext) => {
     emit('mouse-line-intersections', context);
   }
 });
@@ -157,6 +166,8 @@ const toMouseLineOptions = (config?: MouseLinePropConfig) => ({
     cleanup,
     cleanupProviders,
     setMouseLineOptions,
+    setAnnotationFetcher,
+    refreshAnnotationsForPage,
     
     // Computed
     canGoNext,
@@ -173,29 +184,71 @@ const toMouseLineOptions = (config?: MouseLinePropConfig) => ({
       emit('canvas-click', context);
     },
     {
-      mouseLine: toMouseLineOptions(props.mouseLine)
+      mouseLine: toMouseLineOptions(props.mouseLine),
+      annotationFetcher: props.annotationFetcher ?? null
     }
   );
   
   let lastLoadedFile: string | null = null;
+  let lastAnnotationUrl: string | null = null;
+  let lastInlineAnnotationRef: unknown = null;
 
   const loadCurrentPdf = async () => {
     if (!props.file || !workerInitialized.value) {
       return;
     }
 
-    if (!props.overlays) {
-      console.warn('PDFViewer: overlays source missing, skipping load');
+    const hasInlineData = props.overlaysData !== undefined && props.overlaysData !== null;
+    const annotationSource: AnnotationSource | null = hasInlineData
+      ? { data: props.overlaysData }
+      : (props.overlays ?? null);
+
+    if (props.overlays && hasInlineData) {
+      console.warn('PDFViewer: Both overlays URL and inline data provided, using inline data');
+    }
+
+    const hasAnnotationFetcher = typeof props.annotationFetcher === 'function';
+
+    if (!annotationSource && !hasAnnotationFetcher) {
+      console.warn('PDFViewer: No overlays source provided, skipping load');
       return;
     }
 
-    if (lastLoadedFile === props.file) {
+    const isSameUrlSource =
+      typeof annotationSource === 'string' &&
+      lastLoadedFile === props.file &&
+      lastAnnotationUrl === annotationSource;
+
+    const isSameInlineSource =
+      typeof annotationSource !== 'string' &&
+      lastLoadedFile === props.file &&
+      lastInlineAnnotationRef === props.overlaysData;
+
+    const isSameFetcherOnly =
+      !annotationSource &&
+      hasAnnotationFetcher &&
+      lastLoadedFile === props.file &&
+      lastAnnotationUrl === null &&
+      lastInlineAnnotationRef === null;
+
+    if (isSameUrlSource || isSameInlineSource || isSameFetcherOnly) {
       return;
     }
 
     console.log("Loading PDF:", props.file);
-    await loadPdf(props.file, props.overlays);
+    await loadPdf(props.file, annotationSource);
     lastLoadedFile = props.file;
+
+    if (typeof annotationSource === 'string') {
+      lastAnnotationUrl = annotationSource;
+      lastInlineAnnotationRef = null;
+    } else if (annotationSource) {
+      lastAnnotationUrl = null;
+      lastInlineAnnotationRef = props.overlaysData;
+    } else {
+      lastAnnotationUrl = null;
+      lastInlineAnnotationRef = null;
+    }
   };
 
   watch(
@@ -207,11 +260,42 @@ const toMouseLineOptions = (config?: MouseLinePropConfig) => ({
   );
 
   watch(
+    () => props.annotationFetcher,
+    async (fetcher, previous) => {
+      if (fetcher === previous) {
+        return;
+      }
+
+      setAnnotationFetcher(fetcher);
+      lastLoadedFile = null;
+      lastAnnotationUrl = null;
+      lastInlineAnnotationRef = null;
+
+      if (workerInitialized.value) {
+        await loadCurrentPdf();
+      }
+    }
+  );
+
+  watch(
     () => props.overlays,
     async () => {
       lastLoadedFile = null;
+      lastAnnotationUrl = null;
+      lastInlineAnnotationRef = null;
       await loadCurrentPdf();
     }
+  );
+
+  watch(
+    () => props.overlaysData,
+    async () => {
+      lastLoadedFile = null;
+      lastAnnotationUrl = null;
+      lastInlineAnnotationRef = null;
+      await loadCurrentPdf();
+    },
+    { deep: true }
   );
   
   watch(canvasRef, (newCanvas) => {
