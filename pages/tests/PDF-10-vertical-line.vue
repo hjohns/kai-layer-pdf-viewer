@@ -11,8 +11,8 @@ const lastIntersectedIds = ref<string[]>([]);
 // Handle overlay click events - show IRI and semantic data
 const handleOverlayClick = (overlay: OverlayAnnotation) => {
   const iri = overlay['@id'] || 'No IRI';
-  const row = overlay.semanticProperties?.row || 'Unknown';
-  const column = overlay.semanticProperties?.column || 'Unknown';
+  const row = overlay.semanticProperties?.rowIndex || 'Unknown';
+  const column = overlay.semanticProperties?.columnIndex || 'Unknown';
   const confidence = overlay.semanticProperties?.confidence || 'Unknown';
 
   addLog(`🔗 CELL CLICKED: "${overlay.content}"`);
@@ -83,7 +83,7 @@ onMounted(() => {
     <PDFViewer
       ref="pdfViewerRef"
       file="/pdf-tests/pdf-01.pdf"
-      overlays="/pdf-tests/page-8-table-overlay.jsonld"
+      overlays="/pdf-tests/page-8-table-overlay-updated.jsonld"
       @overlay-click="handleOverlayClick"
       @canvas-click="handleCanvasClick"
       :mouse-line="{ enabled: true, color: 'rgba(249, 115, 22, 0.8)', width: 2 }"

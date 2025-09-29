@@ -95,6 +95,10 @@ export function useMouseGuide(
   } | null>(null);
   const tooltipHost = shallowRef<HTMLElement | null>(null);
 
+  // Performance optimization: throttle mouse events using RAF
+  let rafId: number | null = null;
+  let pendingMouseEvent: MouseEvent | null = null;
+
   const mouseLineEnabled = computed(() => options.value.enableMouseLine);
   const mouseLineOrientation = computed<MouseLineOrientation>(() => options.value.orientation ?? 'vertical');
   const tooltipOptions = computed<MouseLineTooltipOptions>(() => ({
@@ -481,7 +485,8 @@ export function useMouseGuide(
     });
   };
 
-  const handleMouseMove = async (event: MouseEvent) => {
+  // Core mouse move processing logic (extracted for throttling)
+  const processMouseMove = async (event: MouseEvent) => {
     const canvas = deps.canvasRef.value;
     const overlayCanvas = deps.overlayCanvasRef.value;
     if (!canvas || !overlayCanvas) {
@@ -581,7 +586,35 @@ export function useMouseGuide(
     emitMouseLineIntersections({ x, y, overlays: intersections });
   };
 
+  // Throttled mouse move handler using requestAnimationFrame
+  const handleMouseMove = (event: MouseEvent) => {
+    // Store the latest mouse event
+    pendingMouseEvent = event;
+
+    // If there's already a pending RAF, don't schedule another
+    if (rafId !== null) {
+      return;
+    }
+
+    // Schedule processing for next frame
+    rafId = requestAnimationFrame(async () => {
+      rafId = null;
+
+      if (pendingMouseEvent) {
+        await processMouseMove(pendingMouseEvent);
+        pendingMouseEvent = null;
+      }
+    });
+  };
+
   const handleMouseLeave = (event: MouseEvent) => {
+    // Cancel any pending RAF when mouse leaves
+    if (rafId !== null) {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+      pendingMouseEvent = null;
+    }
+
     const canvas = deps.canvasRef.value;
     const overlayCanvas = deps.overlayCanvasRef.value;
     if (!canvas || !overlayCanvas) {
@@ -626,10 +659,20 @@ export function useMouseGuide(
     }
   };
 
+  // Cleanup function for RAF resources
+  const cleanup = () => {
+    if (rafId !== null) {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+      pendingMouseEvent = null;
+    }
+  };
+
   return {
     handleMouseMove,
     handleMouseLeave,
     updateMouseGuideOptions,
-    resetMouseLinePayload
+    resetMouseLinePayload,
+    cleanup
   };
 }

@@ -4,11 +4,29 @@ import type { OverlayAnnotation } from '@/types/annotations';
 import type { MouseLineIntersectionContext } from '@/composables/useMouseGuide';
 
 const { addLog } = useLog();
-const SPARQL_ENDPOINT = 'https://ecass-fuseki.agreeablemoss-36d29f99.australiaeast.azurecontainerapps.io/test/query';
-const SPARQL_QUERY = `PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
-CONSTRUCT WHERE {
-  ?sub ?pred ?obj .
+const SPARQL_ENDPOINT = 'https://ecass-fuseki.agreeablemoss-36d29f99.australiaeast.azurecontainerapps.io/confidence/query';
+const SPARQL_QUERY_TEMPLATE = `PREFIX geo: <http://www.opengis.net/ont/geosparql#>
+prefix di: <https://document-intelligence/ontology/>
+prefix sdo: <https://schema.org/>
+DESCRIBE ?cell ?word
+{
+  VALUES ?pagenumber { UNDEF }
+  ?page a di:Page ;
+  di:page ?pagenumber .
+  {
+    ?table sdo:isPartOf ?page .
+    ?table a di:Table .
+    ?page a di:Page .
+    ?cell a di:Cell .
+    ?cell sdo:isPartOf ?table .
+  }
+  UNION
+  {
+    ?word sdo:isPartOf ?page .
+    ?page a di:Page .
+    ?word a di:Word .
+    FILTER NOT EXISTS { ?word sdo:isPartOf ?cell . ?cell a di:Cell }
+  }
 }`;
 
 const pdfViewerRef = ref();
@@ -17,16 +35,17 @@ const mouseLineX = ref<number | null>(null);
 const lastIntersectedIds = ref<string[]>([]);
 
 const fetchAnnotations: AnnotationFetcher = async (pageNumber) => {
-  if (pageNumber !== 8) {
-    addLog(`Skipping remote fetch for page ${pageNumber}`);
-    return { overlay: [] };
-  }
-
   addLog(`Fetching JSON-LD annotations from Fuseki for page ${pageNumber}`);
 
   try {
+    const sparqlQuery = SPARQL_QUERY_TEMPLATE.replace('UNDEF', pageNumber.toString());
+    addLog(`🔍 Generated SPARQL query:`);
+    addLog(sparqlQuery);
+
     const url = `${SPARQL_ENDPOINT}?` +
-      new URLSearchParams({ query: SPARQL_QUERY }).toString();
+      new URLSearchParams({ query: sparqlQuery }).toString();
+
+    addLog(`🌐 Request URL: ${url}`);
 
     const response = await fetch(url, {
       method: 'GET',
@@ -36,13 +55,18 @@ const fetchAnnotations: AnnotationFetcher = async (pageNumber) => {
     });
 
     if (!response.ok) {
-      addLog(`SPARQL request failed with status ${response.status}`);
+      addLog(`❌ SPARQL request failed with status ${response.status}`);
+      const errorText = await response.text();
+      addLog(`❌ Error response: ${errorText}`);
       return { overlay: [] };
     }
 
     const payload = await response.json();
 
-    addLog(`Received JSON-LD payload for page ${pageNumber}`);
+    addLog(`✅ Received JSON-LD payload for page ${pageNumber}`);
+    addLog(`📦 Payload type: ${typeof payload}`);
+    addLog(`📦 Payload keys: ${Object.keys(payload)}`);
+    addLog(`📦 Full payload:`, payload);
     return payload;
   } catch (error) {
     console.error('Failed to fetch SPARQL annotations', error);
@@ -53,8 +77,8 @@ const fetchAnnotations: AnnotationFetcher = async (pageNumber) => {
 
 const handleOverlayClick = (overlay: OverlayAnnotation) => {
   const iri = overlay['@id'] || 'No IRI';
-  const row = overlay.semanticProperties?.row || 'Unknown';
-  const column = overlay.semanticProperties?.column || 'Unknown';
+  const row = overlay.semanticProperties?.rowIndex || 'Unknown';
+  const column = overlay.semanticProperties?.columnIndex || 'Unknown';
   const confidence = overlay.semanticProperties?.confidence || 'Unknown';
 
   addLog(`🔗 CELL CLICKED: "${overlay.content}"`);

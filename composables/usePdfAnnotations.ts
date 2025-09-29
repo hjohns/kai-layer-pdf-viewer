@@ -128,6 +128,37 @@ export function usePdfAnnotations(
     lineHeight: 1.2 // Line height multiplier
   });
 
+  // Utility function to convert WKT POLYGON to legacy coordinate format
+  const convertWktToLegacyFormat = (wktString: string): string => {
+    if (!wktString) return '';
+
+    // Extract coordinates from WKT POLYGON format
+    // Input: "POLYGON((x1 y1, x2 y2, x3 y3, x4 y4, x1 y1))"
+    // Output: "x1,y1 x2,y2 x3,y3 x4,y4"
+
+    const polygonMatch = wktString.match(/POLYGON\s*\(\s*\((.*?)\)\s*\)/i);
+    if (!polygonMatch) return '';
+
+    const coordString = polygonMatch[1];
+    const coordPairs = coordString.split(',').map(pair => pair.trim());
+
+    // Remove the last coordinate pair if it's the same as the first (closing the polygon)
+    if (coordPairs.length > 4) {
+      const firstCoord = coordPairs[0].split(/\s+/);
+      const lastCoord = coordPairs[coordPairs.length - 1].split(/\s+/);
+
+      if (firstCoord.length === 2 && lastCoord.length === 2 &&
+          firstCoord[0] === lastCoord[0] && firstCoord[1] === lastCoord[1]) {
+        coordPairs.pop(); // Remove duplicate closing point
+      }
+    }
+
+    // Convert "x y" to "x,y" format
+    return coordPairs
+      .map(pair => pair.replace(/\s+/, ','))
+      .join(' ');
+  };
+
   // Utility function to convert JSONLD geometry format to rect array
   const convertJsonLDGeometry = (geometry: string): number[] => {
     if (!geometry) return [];
@@ -158,17 +189,70 @@ export function usePdfAnnotations(
       return [];
     }
 
-    return data['@graph'].map((item: any, index: number) => {
-      // Extract basic properties
-      const content = item['doc:content'] || item.content || '';
-      const geometry = item['geom:hasGeometry'] || item.geometry || '';
+    // Create a lookup map for geometry objects by their @id
+    const geometryMap = new Map<string, any>();
+    data['@graph'].forEach((item: any) => {
+      if (item['geo:asWKT']) {
+        geometryMap.set(item['@id'], item);
+      }
+    });
+
+    // Filter and process only cell objects (not geometry objects)
+    const cellItems = data['@graph'].filter((item: any) =>
+      item['@type'] === 'di:Cell' || item['@type'] === 'doc:TableCell' || item['di:content'] || item['doc:content']
+    );
+
+    return cellItems.map((item: any, index: number) => {
+      // Extract basic properties - support both old (doc:) and new (di:) formats
+      const content = item['di:content'] || item['doc:content'] || item.content || '';
+
+      // Extract geometry - support old geom:hasGeometry and new geo:hasGeometry/geo:asWKT formats
+      let geometry = '';
+      if (item['geo:hasGeometry']) {
+        if (item['geo:hasGeometry']['geo:asWKT']) {
+          // Direct WKT format
+          const wktString = item['geo:hasGeometry']['geo:asWKT']['@value'] || item['geo:hasGeometry']['geo:asWKT'];
+          geometry = convertWktToLegacyFormat(wktString);
+        } else if (item['geo:hasGeometry']['@id']) {
+          // Reference to geometry object by @id
+          const geometryRef = item['geo:hasGeometry']['@id'];
+          const geometryObj = geometryMap.get(geometryRef);
+          if (geometryObj && geometryObj['geo:asWKT']) {
+            const wktString = geometryObj['geo:asWKT']['@value'] || geometryObj['geo:asWKT'];
+            geometry = convertWktToLegacyFormat(wktString);
+          }
+        }
+      } else if (item['geom:hasGeometry']) {
+        // Old format
+        geometry = item['geom:hasGeometry'];
+      } else if (item.geometry) {
+        // Fallback
+        geometry = item.geometry;
+      }
+
       const rect = convertJsonLDGeometry(geometry);
 
-      // Extract semantic properties
+      // Extract semantic properties - support both old and new formats
       const semanticProperties: Record<string, any> = {};
+
+      // New format (di: namespace)
+      if (item['di:rowIndex']) semanticProperties.rowIndex = item['di:rowIndex']['@value'] || item['di:rowIndex'];
+      if (item['di:columnIndex']) semanticProperties.columnIndex = item['di:columnIndex']['@value'] || item['di:columnIndex'];
+      if (item['di:kind']) semanticProperties.kind = item['di:kind']['@id'] || item['di:kind'];
+
+      // Handle confidence spans in new format
+      if (item['di:confidenceSpans']) {
+        const confidenceSpan = item['di:confidenceSpans'];
+        if (confidenceSpan['di:confidence']) {
+          semanticProperties.confidence = confidenceSpan['di:confidence']['@value'] || confidenceSpan['di:confidence'];
+        }
+      }
+
+      // Old format (doc: namespace) - keep for backward compatibility
       if (item['doc:row']) semanticProperties.row = item['doc:row']['@value'] || item['doc:row'];
       if (item['doc:column']) semanticProperties.column = item['doc:column']['@value'] || item['doc:column'];
       if (item['doc:confidence']) semanticProperties.confidence = item['doc:confidence']['@value'] || item['doc:confidence'];
+
       if (item['sdo:isPartOf']) semanticProperties.isPartOf = item['sdo:isPartOf']['@id'] || item['sdo:isPartOf'];
 
       // Create OverlayAnnotation
