@@ -1,7 +1,6 @@
 import { ref, computed, shallowRef } from 'vue';
 import type { Ref } from 'vue';
 import type { OverlayAnnotation } from '@/types/annotations';
-import { convertCoordinates } from './useAnnotationGeometry';
 
 export type MouseLineOrientation = 'vertical' | 'horizontal';
 
@@ -71,6 +70,9 @@ export function useMouseGuide(
   deps: MouseGuideDependencies,
   initialOptions?: Partial<MouseLineOptions>
 ) {
+  // Get geometry functions from composable
+  const { convertCoordinates } = useAnnotationGeometry();
+
   const initialTooltipOptions: MouseLineTooltipOptions = {
     ...DEFAULT_TOOLTIP_OPTIONS,
     ...(initialOptions?.tooltip ?? {})

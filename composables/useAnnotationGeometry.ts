@@ -9,7 +9,6 @@ export interface AnnotationPathBounds {
   height: number;
 }
 
-// Spatial index for faster intersection queries
 export interface SpatialGrid {
   cellSize: number;
   canvasWidth: number;
@@ -29,189 +28,135 @@ export interface AnnotationPathData {
   bounds: AnnotationPathBounds;
 }
 
-export const convertCoordinates = (rect: number[], effectiveDpi: number) => {
-  const points: [number, number][] = [];
-  for (let i = 0; i < rect.length; i += 2) {
-    const x = rect[i] * effectiveDpi;
-    const y = rect[i + 1] * effectiveDpi;
-    points.push([x, y]);
-  }
-  return points;
-};
-
-export const buildPathFromPoints = (points: [number, number][]) => {
-  const path = new Path2D();
-  points.forEach(([x, y], index) => {
-    if (index === 0) {
-      path.moveTo(x, y);
-    } else {
-      path.lineTo(x, y);
+export const useAnnotationGeometry = () => {
+  const convertCoordinates = (rect: number[], effectiveDpi: number) => {
+    const points: [number, number][] = [];
+    for (let i = 0; i < rect.length; i += 2) {
+      const x = rect[i] * effectiveDpi;
+      const y = rect[i + 1] * effectiveDpi;
+      points.push([x, y]);
     }
-  });
-  path.closePath();
-  return path;
-};
-
-export const calculateBounds = (points: [number, number][]): AnnotationPathBounds => {
-  const xs = points.map(([x]) => x);
-  const ys = points.map(([, y]) => y);
-
-  const minX = Math.min(...xs);
-  const maxX = Math.max(...xs);
-  const minY = Math.min(...ys);
-  const maxY = Math.max(...ys);
-
-  return {
-    minX,
-    maxX,
-    minY,
-    maxY,
-    width: maxX - minX,
-    height: maxY - minY
+    return points;
   };
-};
 
-export const createAnnotationPath = (
-  annotation: OverlayAnnotation,
-  effectiveDpi: number
-): AnnotationPathData | null => {
-  const points = convertCoordinates(annotation.rect, effectiveDpi);
-  if (!points.length) {
-    return null;
-  }
-  const path = buildPathFromPoints(points);
-  const bounds = calculateBounds(points);
-  return { path, annotation, points, bounds };
-};
-
-// Spatial grid utilities
-export const createSpatialGrid = (canvasWidth: number, canvasHeight: number, cellSize: number = 50): SpatialGrid => {
-  return {
-    cellSize,
-    canvasWidth,
-    canvasHeight,
-    grid: new Map()
+  const buildPathFromPoints = (points: [number, number][]) => {
+    const path = new Path2D();
+    points.forEach(([x, y], index) => {
+      if (index === 0) {
+        path.moveTo(x, y);
+      } else {
+        path.lineTo(x, y);
+      }
+    });
+    path.closePath();
+    return path;
   };
-};
 
-const getCellKey = (x: number, y: number, cellSize: number): string => {
-  const cellX = Math.floor(x / cellSize);
-  const cellY = Math.floor(y / cellSize);
-  return `${cellX},${cellY}`;
-};
+  const calculateBounds = (points: [number, number][]): AnnotationPathBounds => {
+    const xs = points.map(([x]) => x);
+    const ys = points.map(([, y]) => y);
 
-const addAnnotationToGrid = (grid: SpatialGrid, annotation: AnnotationPathData) => {
-  const { bounds } = annotation;
-  const { cellSize } = grid;
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
 
-  // Add annotation to all cells it overlaps
-  const startCellX = Math.floor(bounds.minX / cellSize);
-  const endCellX = Math.floor(bounds.maxX / cellSize);
-  const startCellY = Math.floor(bounds.minY / cellSize);
-  const endCellY = Math.floor(bounds.maxY / cellSize);
+    return {
+      minX,
+      maxX,
+      minY,
+      maxY,
+      width: maxX - minX,
+      height: maxY - minY
+    };
+  };
 
-  for (let cellX = startCellX; cellX <= endCellX; cellX++) {
-    for (let cellY = startCellY; cellY <= endCellY; cellY++) {
-      const key = `${cellX},${cellY}`;
-      if (!grid.grid.has(key)) {
-        grid.grid.set(key, []);
-      }
-      grid.grid.get(key)!.push(annotation);
+  const createAnnotationPath = (
+    annotation: OverlayAnnotation,
+    effectiveDpi: number
+  ): AnnotationPathData | null => {
+    const points = convertCoordinates(annotation.rect, effectiveDpi);
+    if (!points.length) {
+      return null;
     }
-  }
-};
+    const path = buildPathFromPoints(points);
+    const bounds = calculateBounds(points);
+    return { path, annotation, points, bounds };
+  };
 
-export const buildSpatialIndex = (annotations: AnnotationPathData[], canvasWidth: number, canvasHeight: number): AnnotationSpatialIndex => {
-  const spatialGrid = createSpatialGrid(canvasWidth, canvasHeight);
-  const allAnnotations = new Map<string, AnnotationPathData>();
+  const createSpatialGrid = (canvasWidth: number, canvasHeight: number, cellSize: number = 50): SpatialGrid => {
+    return {
+      cellSize,
+      canvasWidth,
+      canvasHeight,
+      grid: new Map()
+    };
+  };
 
-  for (const annotation of annotations) {
-    const id = annotation.annotation['@id'] || `${annotation.annotation.page}-${annotation.annotation.line}`;
-    allAnnotations.set(id, annotation);
-    addAnnotationToGrid(spatialGrid, annotation);
-  }
+  const getCellKey = (x: number, y: number, cellSize: number): string => {
+    const cellX = Math.floor(x / cellSize);
+    const cellY = Math.floor(y / cellSize);
+    return `${cellX},${cellY}`;
+  };
 
-  return { spatialGrid, allAnnotations };
-};
+  const addAnnotationToGrid = (grid: SpatialGrid, annotation: AnnotationPathData) => {
+    const { bounds } = annotation;
+    const { cellSize } = grid;
 
-const getCandidateAnnotationsFromGrid = (grid: SpatialGrid, x: number, y: number): AnnotationPathData[] => {
-  const key = getCellKey(x, y, grid.cellSize);
-  return grid.grid.get(key) || [];
-};
+    // Add annotation to all cells it overlaps
+    const startCellX = Math.floor(bounds.minX / cellSize);
+    const endCellX = Math.floor(bounds.maxX / cellSize);
+    const startCellY = Math.floor(bounds.minY / cellSize);
+    const endCellY = Math.floor(bounds.maxY / cellSize);
 
-export const getAnnotationsIntersectingVerticalLine = (
-  annotationPathValues: Iterable<AnnotationPathData>,
-  x: number,
-  ctx: CanvasRenderingContext2D
-) => {
-  const intersections: OverlayAnnotation[] = [];
-
-  for (const { path, annotation, bounds } of annotationPathValues) {
-    if (x < bounds.minX || x > bounds.maxX) {
-      continue;
-    }
-
-    const sampleCount = Math.max(1, Math.ceil(bounds.height / 8));
-    const step = bounds.height / sampleCount;
-    let intersects = false;
-
-    for (let i = 0; i <= sampleCount; i++) {
-      const y = bounds.minY + step * i;
-      if (ctx.isPointInPath(path, x, y)) {
-        intersects = true;
-        break;
+    for (let cellX = startCellX; cellX <= endCellX; cellX++) {
+      for (let cellY = startCellY; cellY <= endCellY; cellY++) {
+        const key = `${cellX},${cellY}`;
+        if (!grid.grid.has(key)) {
+          grid.grid.set(key, []);
+        }
+        grid.grid.get(key)!.push(annotation);
       }
     }
+  };
 
-    if (intersects) {
-      intersections.push(annotation);
+  const buildSpatialIndex = (annotations: AnnotationPathData[], canvasWidth: number, canvasHeight: number): AnnotationSpatialIndex => {
+    const spatialGrid = createSpatialGrid(canvasWidth, canvasHeight);
+    const allAnnotations = new Map<string, AnnotationPathData>();
+
+    for (const annotation of annotations) {
+      const id = annotation.annotation['@id'] || `${annotation.annotation.page}-${annotation.annotation.line}`;
+      allAnnotations.set(id, annotation);
+      addAnnotationToGrid(spatialGrid, annotation);
     }
-  }
 
-  return intersections;
-};
+    return { spatialGrid, allAnnotations };
+  };
 
-// Optimized version using spatial index
-export const getAnnotationsIntersectingVerticalLineOptimized = (
-  spatialIndex: AnnotationSpatialIndex,
-  x: number,
-  y: number,
-  canvasHeight: number,
-  ctx: CanvasRenderingContext2D
-) => {
-  const intersections: OverlayAnnotation[] = [];
-  const processedIds = new Set<string>();
+  const getCandidateAnnotationsFromGrid = (grid: SpatialGrid, x: number, y: number): AnnotationPathData[] => {
+    const key = getCellKey(x, y, grid.cellSize);
+    return grid.grid.get(key) || [];
+  };
 
-  // Sample points along the vertical line to get candidate annotations
-  const sampleCount = Math.max(5, Math.ceil(canvasHeight / spatialIndex.spatialGrid.cellSize));
-  const step = canvasHeight / sampleCount;
+  const getAnnotationsIntersectingVerticalLine = (
+    annotationPathValues: Iterable<AnnotationPathData>,
+    x: number,
+    ctx: CanvasRenderingContext2D
+  ) => {
+    const intersections: OverlayAnnotation[] = [];
 
-  for (let i = 0; i <= sampleCount; i++) {
-    const sampleY = step * i;
-    const candidates = getCandidateAnnotationsFromGrid(spatialIndex.spatialGrid, x, sampleY);
-
-    for (const { path, annotation, bounds } of candidates) {
-      const id = annotation['@id'] || `${annotation.page}-${annotation.line}`;
-
-      // Skip if already processed
-      if (processedIds.has(id)) {
-        continue;
-      }
-      processedIds.add(id);
-
-      // Quick bounds check
+    for (const { path, annotation, bounds } of annotationPathValues) {
       if (x < bounds.minX || x > bounds.maxX) {
         continue;
       }
 
-      // Detailed intersection test
-      const detailSampleCount = Math.max(1, Math.ceil(bounds.height / 8));
-      const detailStep = bounds.height / detailSampleCount;
+      const sampleCount = Math.max(1, Math.ceil(bounds.height / 8));
+      const step = bounds.height / sampleCount;
       let intersects = false;
 
-      for (let j = 0; j <= detailSampleCount; j++) {
-        const testY = bounds.minY + detailStep * j;
-        if (ctx.isPointInPath(path, x, testY)) {
+      for (let i = 0; i <= sampleCount; i++) {
+        const y = bounds.minY + step * i;
+        if (ctx.isPointInPath(path, x, y)) {
           intersects = true;
           break;
         }
@@ -221,84 +166,83 @@ export const getAnnotationsIntersectingVerticalLineOptimized = (
         intersections.push(annotation);
       }
     }
-  }
 
-  return intersections;
-};
+    return intersections;
+  };
 
-export const getAnnotationsIntersectingHorizontalLine = (
-  annotationPathValues: Iterable<AnnotationPathData>,
-  y: number,
-  ctx: CanvasRenderingContext2D
-) => {
-  const intersections: OverlayAnnotation[] = [];
+  const getAnnotationsIntersectingVerticalLineOptimized = (
+    spatialIndex: AnnotationSpatialIndex,
+    x: number,
+    y: number,
+    canvasHeight: number,
+    ctx: CanvasRenderingContext2D
+  ) => {
+    const intersections: OverlayAnnotation[] = [];
+    const processedIds = new Set<string>();
 
-  for (const { path, annotation, bounds } of annotationPathValues) {
-    if (y < bounds.minY || y > bounds.maxY) {
-      continue;
-    }
-
-    const sampleCount = Math.max(1, Math.ceil(bounds.width / 8));
-    const step = bounds.width / sampleCount;
-    let intersects = false;
+    // Sample points along the vertical line to get candidate annotations
+    const sampleCount = Math.max(5, Math.ceil(canvasHeight / spatialIndex.spatialGrid.cellSize));
+    const step = canvasHeight / sampleCount;
 
     for (let i = 0; i <= sampleCount; i++) {
-      const x = bounds.minX + step * i;
-      if (ctx.isPointInPath(path, x, y)) {
-        intersects = true;
-        break;
+      const sampleY = step * i;
+      const candidates = getCandidateAnnotationsFromGrid(spatialIndex.spatialGrid, x, sampleY);
+
+      for (const { path, annotation, bounds } of candidates) {
+        const id = annotation['@id'] || `${annotation.page}-${annotation.line}`;
+
+        // Skip if already processed
+        if (processedIds.has(id)) {
+          continue;
+        }
+        processedIds.add(id);
+
+        // Quick bounds check
+        if (x < bounds.minX || x > bounds.maxX) {
+          continue;
+        }
+
+        // Detailed intersection test
+        const detailSampleCount = Math.max(1, Math.ceil(bounds.height / 8));
+        const detailStep = bounds.height / detailSampleCount;
+        let intersects = false;
+
+        for (let j = 0; j <= detailSampleCount; j++) {
+          const testY = bounds.minY + detailStep * j;
+          if (ctx.isPointInPath(path, x, testY)) {
+            intersects = true;
+            break;
+          }
+        }
+
+        if (intersects) {
+          intersections.push(annotation);
+        }
       }
     }
 
-    if (intersects) {
-      intersections.push(annotation);
-    }
-  }
+    return intersections;
+  };
 
-  return intersections;
-};
+  const getAnnotationsIntersectingHorizontalLine = (
+    annotationPathValues: Iterable<AnnotationPathData>,
+    y: number,
+    ctx: CanvasRenderingContext2D
+  ) => {
+    const intersections: OverlayAnnotation[] = [];
 
-// Optimized version using spatial index for horizontal lines
-export const getAnnotationsIntersectingHorizontalLineOptimized = (
-  spatialIndex: AnnotationSpatialIndex,
-  x: number,
-  y: number,
-  canvasWidth: number,
-  ctx: CanvasRenderingContext2D
-) => {
-  const intersections: OverlayAnnotation[] = [];
-  const processedIds = new Set<string>();
-
-  // Sample points along the horizontal line to get candidate annotations
-  const sampleCount = Math.max(5, Math.ceil(canvasWidth / spatialIndex.spatialGrid.cellSize));
-  const step = canvasWidth / sampleCount;
-
-  for (let i = 0; i <= sampleCount; i++) {
-    const sampleX = step * i;
-    const candidates = getCandidateAnnotationsFromGrid(spatialIndex.spatialGrid, sampleX, y);
-
-    for (const { path, annotation, bounds } of candidates) {
-      const id = annotation['@id'] || `${annotation.page}-${annotation.line}`;
-
-      // Skip if already processed
-      if (processedIds.has(id)) {
-        continue;
-      }
-      processedIds.add(id);
-
-      // Quick bounds check
+    for (const { path, annotation, bounds } of annotationPathValues) {
       if (y < bounds.minY || y > bounds.maxY) {
         continue;
       }
 
-      // Detailed intersection test
-      const detailSampleCount = Math.max(1, Math.ceil(bounds.width / 8));
-      const detailStep = bounds.width / detailSampleCount;
+      const sampleCount = Math.max(1, Math.ceil(bounds.width / 8));
+      const step = bounds.width / sampleCount;
       let intersects = false;
 
-      for (let j = 0; j <= detailSampleCount; j++) {
-        const testX = bounds.minX + detailStep * j;
-        if (ctx.isPointInPath(path, testX, y)) {
+      for (let i = 0; i <= sampleCount; i++) {
+        const x = bounds.minX + step * i;
+        if (ctx.isPointInPath(path, x, y)) {
           intersects = true;
           break;
         }
@@ -308,7 +252,74 @@ export const getAnnotationsIntersectingHorizontalLineOptimized = (
         intersections.push(annotation);
       }
     }
-  }
 
-  return intersections;
+    return intersections;
+  };
+
+  const getAnnotationsIntersectingHorizontalLineOptimized = (
+    spatialIndex: AnnotationSpatialIndex,
+    x: number,
+    y: number,
+    canvasWidth: number,
+    ctx: CanvasRenderingContext2D
+  ) => {
+    const intersections: OverlayAnnotation[] = [];
+    const processedIds = new Set<string>();
+
+    // Sample points along the horizontal line to get candidate annotations
+    const sampleCount = Math.max(5, Math.ceil(canvasWidth / spatialIndex.spatialGrid.cellSize));
+    const step = canvasWidth / sampleCount;
+
+    for (let i = 0; i <= sampleCount; i++) {
+      const sampleX = step * i;
+      const candidates = getCandidateAnnotationsFromGrid(spatialIndex.spatialGrid, sampleX, y);
+
+      for (const { path, annotation, bounds } of candidates) {
+        const id = annotation['@id'] || `${annotation.page}-${annotation.line}`;
+
+        // Skip if already processed
+        if (processedIds.has(id)) {
+          continue;
+        }
+        processedIds.add(id);
+
+        // Quick bounds check
+        if (y < bounds.minY || y > bounds.maxY) {
+          continue;
+        }
+
+        // Detailed intersection test
+        const detailSampleCount = Math.max(1, Math.ceil(bounds.width / 8));
+        const detailStep = bounds.width / detailSampleCount;
+        let intersects = false;
+
+        for (let j = 0; j <= detailSampleCount; j++) {
+          const testX = bounds.minX + detailStep * j;
+          if (ctx.isPointInPath(path, testX, y)) {
+            intersects = true;
+            break;
+          }
+        }
+
+        if (intersects) {
+          intersections.push(annotation);
+        }
+      }
+    }
+
+    return intersections;
+  };
+
+  return {
+    convertCoordinates,
+    buildPathFromPoints,
+    calculateBounds,
+    createAnnotationPath,
+    createSpatialGrid,
+    buildSpatialIndex,
+    getAnnotationsIntersectingVerticalLine,
+    getAnnotationsIntersectingVerticalLineOptimized,
+    getAnnotationsIntersectingHorizontalLine,
+    getAnnotationsIntersectingHorizontalLineOptimized
+  };
 };

@@ -2,18 +2,7 @@ import { ref, computed, type Ref } from 'vue';
 import html2canvas from 'html2canvas';
 import type { OverlayAnnotation } from '@/types/annotations';
 import { usePdfCoordinates } from './usePdfCoordinates';
-import type { AnnotationPathData } from './useAnnotationGeometry';
-import {
-  convertCoordinates,
-  createAnnotationPath,
-  getAnnotationsIntersectingVerticalLine,
-  getAnnotationsIntersectingHorizontalLine,
-  getAnnotationsIntersectingVerticalLineOptimized,
-  getAnnotationsIntersectingHorizontalLineOptimized,
-  buildSpatialIndex,
-  type AnnotationSpatialIndex
-} from './useAnnotationGeometry';
-import { getConfidenceColors } from './useAnnotationStyling';
+import type { AnnotationPathData, AnnotationSpatialIndex } from './useAnnotationGeometry';
 
 // Custom annotation provider interfaces
 export interface AnnotationRenderContext {
@@ -108,6 +97,22 @@ export function usePdfAnnotations(
     addTrackedOverlay: (id: string, element: HTMLElement) => void;
   }
 ) {
+  // Get composable functions
+  const geometryComposable = useAnnotationGeometry();
+  const stylingComposable = useAnnotationStyling();
+
+  const {
+    convertCoordinates,
+    createAnnotationPath,
+    buildSpatialIndex,
+    getAnnotationsIntersectingVerticalLine,
+    getAnnotationsIntersectingHorizontalLine,
+    getAnnotationsIntersectingVerticalLineOptimized,
+    getAnnotationsIntersectingHorizontalLineOptimized
+  } = geometryComposable;
+
+  const { getConfidenceColors } = stylingComposable;
+
   // State
   const pageAnnotations = ref<OverlayAnnotation[]>([]);
   const selectedAnnotation = ref<OverlayAnnotation | null>(null);
@@ -1332,8 +1337,6 @@ export function usePdfAnnotations(
     loadAnnotations,
     initializePdfCoordinates,
     getAnnotationsForPage,
-    convertCoordinates,
-    createAnnotationPath,
     drawAnnotations,
     getAnnotationAtPoint,
     getAnnotationsIntersectingVerticalLine: findAnnotationsIntersectingVerticalLine,
