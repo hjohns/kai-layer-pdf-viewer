@@ -54,13 +54,18 @@
           </div>
           <div class="mt-4 pdf-container" ref="containerRef">
             <div class="relative">
-              <canvas 
-                ref="canvasRef" 
-                class="border" 
+              <canvas
+                ref="canvasRef"
+                class="border"
                 style="min-width: 100px; min-height: 100px;"
                 @click="handleCanvasClick"
                 @mousemove="handleCanvasMouseMove"
                 @mouseleave="handleCanvasMouseLeave"
+              ></canvas>
+              <canvas
+                ref="annotationCanvasRef"
+                class="absolute top-0 left-0 pointer-events-none"
+                style="min-width: 100px; min-height: 100px;"
               ></canvas>
               <canvas
                 ref="overlayCanvasRef"
@@ -147,6 +152,7 @@ const toMouseLineOptions = (config?: MouseLinePropConfig) => ({
     metadata,
     workerInitialized,
     canvasRef,
+    annotationCanvasRef,
     overlayCanvasRef,
     htmlOverlayContainer,
     

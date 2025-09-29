@@ -7,7 +7,11 @@ import {
   convertCoordinates,
   createAnnotationPath,
   getAnnotationsIntersectingVerticalLine,
-  getAnnotationsIntersectingHorizontalLine
+  getAnnotationsIntersectingHorizontalLine,
+  getAnnotationsIntersectingVerticalLineOptimized,
+  getAnnotationsIntersectingHorizontalLineOptimized,
+  buildSpatialIndex,
+  type AnnotationSpatialIndex
 } from './useAnnotationGeometry';
 import { getConfidenceColors } from './useAnnotationStyling';
 
@@ -98,12 +102,17 @@ export function usePdfAnnotations(
   canvasRef?: Ref<HTMLCanvasElement | null>,
   htmlOverlayContainer?: Ref<HTMLElement | null>,
   htmlAnnotation?: (context: AnnotationRenderContext, annotation: OverlayAnnotation) => string,
-  onOverlayClick?: (overlay: OverlayAnnotation, context: { x: number, y: number, pageNumber: number }) => void
+  onOverlayClick?: (overlay: OverlayAnnotation, context: { x: number, y: number, pageNumber: number }) => void,
+  overlayManagement?: {
+    createOverlayElement: () => HTMLElement;
+    addTrackedOverlay: (id: string, element: HTMLElement) => void;
+  }
 ) {
   // State
   const pageAnnotations = ref<OverlayAnnotation[]>([]);
   const selectedAnnotation = ref<OverlayAnnotation | null>(null);
   const annotationPaths = ref(new Map<string, AnnotationPathData>());
+  const spatialIndex = ref<AnnotationSpatialIndex | null>(null);
   const showDialog = ref(false);
   
   // Use global singleton state
@@ -399,31 +408,103 @@ export function usePdfAnnotations(
 
   // Get annotations for a specific page
   const getAnnotationsForPage = (pageNumber: number) => {
-    return pageAnnotations.value.filter(
-      (annotation: OverlayAnnotation) => annotation.page === (pageNumber + 1).toString()
+    console.log('[Get Annotations] Requested page:', pageNumber, 'Total annotations:', pageAnnotations.value.length);
+    console.log('[Get Annotations] Looking for page:', (pageNumber + 1).toString());
+
+    const filtered = pageAnnotations.value.filter(
+      (annotation: OverlayAnnotation) => {
+        console.log('[Get Annotations] Checking annotation page:', annotation.page, 'vs target:', (pageNumber + 1).toString());
+        return annotation.page === (pageNumber + 1).toString();
+      }
     );
+
+    console.log('[Get Annotations] Found', filtered.length, 'annotations for page', pageNumber);
+    if (filtered.length > 0) {
+      console.log('[Get Annotations] First annotation:', filtered[0]);
+    }
+
+    return filtered;
   };
 
-  // Draw annotations on canvas
+  // Build spatial index for fast intersection queries
+  const buildAnnotationSpatialIndex = (canvasElement: HTMLCanvasElement | null) => {
+    if (!canvasElement || annotationPaths.value.size === 0) {
+      spatialIndex.value = null;
+      return;
+    }
+
+    const annotationPathArray = Array.from(annotationPaths.value.values());
+    spatialIndex.value = buildSpatialIndex(
+      annotationPathArray,
+      canvasElement.width,
+      canvasElement.height
+    );
+
+    console.debug('Built spatial index with', annotationPathArray.length, 'annotations');
+  };
+
+  // Virtual rendering helper - check if annotation is in viewport
+  const isAnnotationInViewport = (annotation: OverlayAnnotation, effectiveDpi: number, canvasElement: HTMLCanvasElement | null): boolean => {
+    if (!canvasElement || !annotation.rect || annotation.rect.length < 4) {
+      return true; // Render if we can't determine bounds
+    }
+
+    // Convert annotation coordinates to canvas coordinates
+    const points = convertCoordinates(annotation.rect, effectiveDpi);
+    if (points.length === 0) return true;
+
+    const xs = points.map(p => p[0]);
+    const ys = points.map(p => p[1]);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+
+    // Get current viewport bounds (considering canvas transform/zoom)
+    const viewportMinX = 0;
+    const viewportMaxX = canvasElement.width;
+    const viewportMinY = 0;
+    const viewportMaxY = canvasElement.height;
+
+    // Check if annotation bounds intersect with viewport
+    return !(maxX < viewportMinX || minX > viewportMaxX || maxY < viewportMinY || minY > viewportMaxY);
+  };
+
+  // Draw annotations on canvas with virtual rendering optimization
   const drawAnnotations = (
-    ctx: CanvasRenderingContext2D, 
-    pageNumber: number, 
+    ctx: CanvasRenderingContext2D,
+    pageNumber: number,
     effectiveDpi: number
   ) => {
     const currentPageAnnotations = getAnnotationsForPage(pageNumber);
-    
-    // Clear existing paths
+
+    // Clear existing paths and spatial index
     annotationPaths.value.clear();
-    
+    spatialIndex.value = null;
+
+    // Performance optimization: Use virtual rendering for large datasets
+    const VIRTUAL_RENDERING_THRESHOLD = 50;
+    const useVirtualRendering = currentPageAnnotations.length > VIRTUAL_RENDERING_THRESHOLD;
+
+    let renderedCount = 0;
+    let culledCount = 0;
+
     for (const annotation of currentPageAnnotations) {
       const annotationId = `annotation-${annotation.page}-${annotation.line}`;
+
+      // Virtual rendering: skip annotations outside viewport for large datasets
+      if (useVirtualRendering && !isAnnotationInViewport(annotation, effectiveDpi, canvasRef?.value || null)) {
+        culledCount++;
+        continue;
+      }
+
       const pathData = createAnnotationPath(annotation, effectiveDpi);
       if (!pathData) {
         continue;
       }
       const { path } = pathData;
       const { fill, stroke } = getConfidenceColors(annotation);
-      
+
       // Draw the annotation
       ctx.save();
       ctx.beginPath();
@@ -433,10 +514,36 @@ export function usePdfAnnotations(
       ctx.fill(path);
       ctx.stroke(path);
       ctx.restore();
-      
+
       // Store path for hit testing
       annotationPaths.value.set(annotationId, pathData);
+      renderedCount++;
     }
+
+    // Build spatial index after all paths are created
+    if (canvasRef?.value) {
+      buildAnnotationSpatialIndex(canvasRef.value);
+    }
+
+    if (useVirtualRendering) {
+      console.log(`[Virtual Rendering] Rendered ${renderedCount}/${currentPageAnnotations.length} annotations (culled ${culledCount})`);
+    } else {
+      console.log(`[Standard Rendering] Rendered ${renderedCount} annotations`);
+    }
+
+    console.log('[Annotation Rendering] Total annotations for page:', currentPageAnnotations.length);
+    console.log('[Annotation Rendering] AnnotationPaths size:', annotationPaths.value.size);
+    console.log('[Annotation Rendering] Spatial index:', spatialIndex.value ? 'built' : 'null');
+    console.log('[Annotation Rendering] Total pageAnnotations in memory:', pageAnnotations.value.length);
+
+    // Debug the first few annotations
+    currentPageAnnotations.slice(0, 3).forEach((ann, i) => {
+      console.log(`[Annotation ${i}] Content:`, ann.content, 'Rect:', ann.rect, 'Page:', ann.page);
+    });
+
+    // Also debug the raw pageAnnotations to see what pages we have
+    const availablePages = new Set(pageAnnotations.value.map(ann => ann.page));
+    console.log('[Annotation Rendering] Available pages in annotations:', Array.from(availablePages));
   };
 
   // Check if point is inside any annotation
@@ -450,10 +557,43 @@ export function usePdfAnnotations(
   };
 
   const findAnnotationsIntersectingVerticalLine = (x: number, ctx: CanvasRenderingContext2D) => {
-    return getAnnotationsIntersectingVerticalLine(annotationPaths.value.values(), x, ctx);
+    console.log('[Intersection Debug] Vertical line at x:', x);
+    console.log('[Intersection Debug] AnnotationPaths available:', annotationPaths.value.size);
+    console.log('[Intersection Debug] Spatial index available:', spatialIndex.value ? 'yes' : 'no');
+
+    let result;
+    // Use optimized spatial index if available
+    if (spatialIndex.value && canvasRef?.value) {
+      console.log('[Intersection Debug] Using spatial index');
+      result = getAnnotationsIntersectingVerticalLineOptimized(
+        spatialIndex.value,
+        x,
+        0, // y is not used for vertical line lookup in spatial grid
+        canvasRef.value.height,
+        ctx
+      );
+    } else {
+      console.log('[Intersection Debug] Using fallback method');
+      result = getAnnotationsIntersectingVerticalLine(annotationPaths.value.values(), x, ctx);
+    }
+
+    console.log('[Intersection Debug] Found', result.length, 'intersecting annotations');
+    return result;
   };
 
   const findAnnotationsIntersectingHorizontalLine = (y: number, ctx: CanvasRenderingContext2D) => {
+    // Use optimized spatial index if available
+    if (spatialIndex.value && canvasRef?.value) {
+      return getAnnotationsIntersectingHorizontalLineOptimized(
+        spatialIndex.value,
+        0, // x is not used for horizontal line lookup in spatial grid
+        y,
+        canvasRef.value.width,
+        ctx
+      );
+    }
+
+    // Fallback to original method
     return getAnnotationsIntersectingHorizontalLine(annotationPaths.value.values(), y, ctx);
   };
 
@@ -679,7 +819,10 @@ export function usePdfAnnotations(
     if (htmlAnnotation && canvasRef?.value && htmlOverlayContainer?.value) {
       try {
         console.log('[Simple HTML Render] Creating overlay for:', annotation.content);
-        
+        console.log('[Simple HTML Render] Canvas element:', canvasRef.value);
+        console.log('[Simple HTML Render] Overlay container:', htmlOverlayContainer.value);
+        console.log('[Simple HTML Render] Annotation rect:', annotation.rect);
+
         // Check if overlay already exists for this annotation
         const annotationId = `${annotation.page}-${annotation.line}`;
         const existingOverlay = htmlOverlayContainer.value.querySelector(`[data-annotation-id="${annotationId}"]`);
@@ -690,13 +833,15 @@ export function usePdfAnnotations(
         
         // Generate HTML using the provided function
         const htmlContent = htmlAnnotation(context, annotation);
-        
-        // Create overlay element
-        const overlay = document.createElement('div');
+        console.log('[Simple HTML Render] Generated HTML content:', htmlContent);
+
+        // Create overlay element using optimized system
+        const overlay = overlayManagement?.createOverlayElement() || document.createElement('div');
         overlay.innerHTML = htmlContent;
         overlay.className = 'pdf-simple-html-overlay';
         overlay.setAttribute('data-annotation-id', annotationId);
-        
+        console.log('[Simple HTML Render] Created overlay element:', overlay);
+
         // Position overlay using coordinate conversion
         const screenCoords = convertPdfCoordsToOverlayCoords(
           annotation,
@@ -704,6 +849,7 @@ export function usePdfAnnotations(
           canvasRef.value,
           { minX, minY, width, height }
         );
+        console.log('[Simple HTML Render] Screen coordinates:', screenCoords);
         
         if (screenCoords) {
           // Calculate scaled font size based on zoom level
@@ -711,6 +857,11 @@ export function usePdfAnnotations(
           const canvasActualWidth = canvasRef.value.width;
           const scaleRatio = canvasBounds.width / canvasActualWidth;
           const scaledFontSize = Math.max(8, Math.min(16, 12 * scaleRatio)); // Min 8px, max 16px
+
+          console.log('[Simple HTML Render] Canvas bounds:', canvasBounds);
+          console.log('[Simple HTML Render] Canvas actual width:', canvasActualWidth);
+          console.log('[Simple HTML Render] Scale ratio:', scaleRatio);
+          console.log('[Simple HTML Render] Scaled font size:', scaledFontSize);
           
           // Create a temporary element to measure the actual HTML content size
           const tempMeasure = document.createElement('div');
@@ -734,7 +885,12 @@ export function usePdfAnnotations(
           const centerY = screenCoords.y + (screenCoords.height / 2);
           const overlayLeft = centerX - (naturalWidth / 2);
           const overlayTop = centerY - (naturalHeight / 2);
-          
+
+          console.log('[Simple HTML Render] Positioning calculations:');
+          console.log('  - Center X:', centerX, 'Center Y:', centerY);
+          console.log('  - Natural size:', naturalWidth, 'x', naturalHeight);
+          console.log('  - Final position:', overlayLeft, ',', overlayTop);
+
           overlay.style.position = 'absolute';
           overlay.style.left = `${overlayLeft}px`;
           overlay.style.top = `${overlayTop}px`;
@@ -745,6 +901,10 @@ export function usePdfAnnotations(
           overlay.style.fontSize = `${scaledFontSize}px`;
           overlay.style.fontFamily = 'Arial, sans-serif';
           overlay.style.boxSizing = 'border-box';
+          overlay.style.backgroundColor = 'rgba(255, 255, 0, 0.8)'; // Add visible background for debugging
+          overlay.style.border = '2px solid red'; // Add visible border for debugging
+
+          console.log('[Simple HTML Render] Applied styles:', overlay.style.cssText);
           
           // Add click handler that calls the overlay click callback directly
           overlay.addEventListener('click', (event) => {
@@ -775,10 +935,20 @@ export function usePdfAnnotations(
           });
           
           htmlOverlayContainer.value.appendChild(overlay);
-          console.log('[Simple HTML Render] Overlay created and positioned:');
-          console.log('  - PDF rect center:', centerX.toFixed(1), ',', centerY.toFixed(1));
-          console.log('  - Overlay position:', overlayLeft.toFixed(1), ',', overlayTop.toFixed(1));
-          console.log('  - Natural size:', naturalWidth, 'x', naturalHeight, 'Scaled font size:', scaledFontSize);
+
+          // Track the overlay in the optimized management system
+          if (overlayManagement?.addTrackedOverlay) {
+            overlayManagement.addTrackedOverlay(annotationId, overlay);
+          }
+
+          console.debug('[Simple HTML Render] Overlay created and positioned:', {
+            annotationId,
+            centerX: centerX.toFixed(1),
+            centerY: centerY.toFixed(1),
+            position: [overlayLeft.toFixed(1), overlayTop.toFixed(1)],
+            size: [naturalWidth, naturalHeight],
+            scaledFontSize
+          });
           
           // Skip provider-based rendering - HTML overlay IS the visual representation
           return;
@@ -1007,6 +1177,7 @@ export function usePdfAnnotations(
   // Clear all annotations
   const clearAnnotations = () => {
     annotationPaths.value.clear();
+    spatialIndex.value = null;
     selectedAnnotation.value = null;
     showDialog.value = false;
   };

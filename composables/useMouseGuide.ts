@@ -32,12 +32,13 @@ export interface MouseLineOptions {
 interface MouseGuideDependencies {
   canvasRef: Ref<HTMLCanvasElement | null>;
   overlayCanvasRef: Ref<HTMLCanvasElement | null>;
+  annotationCanvasRef?: Ref<HTMLCanvasElement | null>;
   htmlOverlayContainer: Ref<HTMLElement | null>;
   currentPage: Ref<number>;
   handleAnnotationHover: (x: number, y: number, ctx: CanvasRenderingContext2D) => boolean;
   getAnnotationAtPoint: (x: number, y: number, ctx: CanvasRenderingContext2D) => OverlayAnnotation | null;
   drawHoverEffect: (ctx: CanvasRenderingContext2D, x: number, y: number, effectiveDpi: number) => Promise<void>;
-  clearHtmlOverlays: () => void;
+  clearHtmlOverlays: (reason?: string) => void;
   getAnnotationsIntersectingVerticalLine: (x: number, ctx: CanvasRenderingContext2D) => OverlayAnnotation[];
   getAnnotationsIntersectingHorizontalLine: (y: number, ctx: CanvasRenderingContext2D) => OverlayAnnotation[];
 }
@@ -98,6 +99,73 @@ export function useMouseGuide(
   // Performance optimization: throttle mouse events using RAF
   let rafId: number | null = null;
   let pendingMouseEvent: MouseEvent | null = null;
+
+  // Dirty region tracking for optimized canvas redraws
+  interface DirtyRegion {
+    minX: number;
+    minY: number;
+    maxX: number;
+    maxY: number;
+  }
+
+  let dirtyRegion: DirtyRegion | null = null;
+  let previousMouseLinePosition: { x: number; y: number; orientation: MouseLineOrientation } | null = null;
+  let previousHoverAnnotation: OverlayAnnotation | null = null;
+
+  // Dirty region management
+  const expandDirtyRegion = (minX: number, minY: number, maxX: number, maxY: number) => {
+    if (!dirtyRegion) {
+      dirtyRegion = { minX, minY, maxX, maxY };
+    } else {
+      dirtyRegion.minX = Math.min(dirtyRegion.minX, minX);
+      dirtyRegion.minY = Math.min(dirtyRegion.minY, minY);
+      dirtyRegion.maxX = Math.max(dirtyRegion.maxX, maxX);
+      dirtyRegion.maxY = Math.max(dirtyRegion.maxY, maxY);
+    }
+  };
+
+  const addMouseLineToDirtyRegion = (x: number, y: number, orientation: MouseLineOrientation, canvas: HTMLCanvasElement) => {
+    const lineWidth = options.value.mouseLineWidth;
+    const margin = Math.ceil(lineWidth / 2) + 1; // Extra pixel for anti-aliasing
+
+    if (orientation === 'vertical') {
+      expandDirtyRegion(x - margin, 0, x + margin, canvas.height);
+    } else {
+      expandDirtyRegion(0, y - margin, canvas.width, y + margin);
+    }
+  };
+
+  const addAnnotationToDirtyRegion = (annotation: OverlayAnnotation, effectiveDpi: number) => {
+    if (!annotation.rect || annotation.rect.length < 4) return;
+
+    const points = convertCoordinates(annotation.rect, effectiveDpi);
+    if (points.length === 0) return;
+
+    const xs = points.map(p => p[0]);
+    const ys = points.map(p => p[1]);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+
+    // Add small margin for text and borders
+    const margin = 5;
+    expandDirtyRegion(minX - margin, minY - margin, maxX + margin, maxY + margin);
+  };
+
+  const clearDirtyRegion = (ctx: CanvasRenderingContext2D) => {
+    if (!dirtyRegion) return;
+
+    const { minX, minY, maxX, maxY } = dirtyRegion;
+    const width = maxX - minX;
+    const height = maxY - minY;
+
+    if (width > 0 && height > 0) {
+      ctx.clearRect(minX, minY, width, height);
+    }
+
+    dirtyRegion = null;
+  };
 
   const mouseLineEnabled = computed(() => options.value.enableMouseLine);
   const mouseLineOrientation = computed<MouseLineOrientation>(() => options.value.orientation ?? 'vertical');
@@ -489,6 +557,7 @@ export function useMouseGuide(
   const processMouseMove = async (event: MouseEvent) => {
     const canvas = deps.canvasRef.value;
     const overlayCanvas = deps.overlayCanvasRef.value;
+    const annotationCanvas = deps.annotationCanvasRef?.value;
     if (!canvas || !overlayCanvas) {
       return;
     }
@@ -502,6 +571,10 @@ export function useMouseGuide(
       return;
     }
 
+    // Use annotation canvas context for annotation detection if available
+    const annotationCtx = annotationCanvas?.getContext('2d') || overlayCtx;
+    console.log('[Mouse Guide] Using annotation canvas:', !!annotationCanvas, 'for annotation detection');
+
     const rect = canvas.getBoundingClientRect();
     const scaleX = canvas.width / rect.width;
     const scaleY = canvas.height / rect.height;
@@ -510,8 +583,9 @@ export function useMouseGuide(
     const y = (event.clientY - rect.top) * scaleY;
     const orientation = mouseLineOrientation.value;
 
-    const isOverAnnotation = deps.handleAnnotationHover(x, y, overlayCtx);
-    const currentAnnotation = isOverAnnotation ? deps.getAnnotationAtPoint(x, y, overlayCtx) : null;
+    const isOverAnnotation = deps.handleAnnotationHover(x, y, annotationCtx);
+    const currentAnnotation = isOverAnnotation ? deps.getAnnotationAtPoint(x, y, annotationCtx) : null;
+    console.log('[Mouse Guide] Annotation detection - isOverAnnotation:', isOverAnnotation, 'currentAnnotation:', currentAnnotation?.content);
     const annotationChanged = previousHoveredAnnotation.value !== currentAnnotation;
     const hoverStateChanged = previousHoverState.value !== isOverAnnotation;
     const shouldRedraw = mouseLineEnabled.value || hoverStateChanged || annotationChanged;
@@ -519,10 +593,47 @@ export function useMouseGuide(
     let intersections: OverlayAnnotation[] = [];
 
     if (shouldRedraw) {
-      overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+      // Build dirty region based on what needs to be redrawn
+
+      // Add previous mouse line position to dirty region if it exists
+      if (previousMouseLinePosition && mouseLineEnabled.value) {
+        addMouseLineToDirtyRegion(
+          previousMouseLinePosition.x,
+          previousMouseLinePosition.y,
+          previousMouseLinePosition.orientation,
+          overlayCanvas
+        );
+      }
+
+      // Add previous hover annotation to dirty region if it changed
+      if (previousHoverAnnotation && annotationChanged) {
+        const baseScale = (window.devicePixelRatio * 96) / 72;
+        const PDF_POINTS_PER_INCH = 72;
+        const SCALE_FACTOR = 1;
+        const effectiveDpi = baseScale * PDF_POINTS_PER_INCH * SCALE_FACTOR;
+        addAnnotationToDirtyRegion(previousHoverAnnotation, effectiveDpi);
+      }
+
+      // Add current mouse line position to dirty region
+      if (mouseLineEnabled.value) {
+        addMouseLineToDirtyRegion(x, y, orientation, overlayCanvas);
+      }
+
+      // Add current hover annotation to dirty region
+      if (currentAnnotation) {
+        const baseScale = (window.devicePixelRatio * 96) / 72;
+        const PDF_POINTS_PER_INCH = 72;
+        const SCALE_FACTOR = 1;
+        const effectiveDpi = baseScale * PDF_POINTS_PER_INCH * SCALE_FACTOR;
+        addAnnotationToDirtyRegion(currentAnnotation, effectiveDpi);
+      }
+
+      // Clear only the dirty region instead of the entire canvas
+      clearDirtyRegion(overlayCtx);
 
       if (!isOverAnnotation || annotationChanged) {
-        deps.clearHtmlOverlays();
+        console.log('[Mouse Guide] Clearing HTML overlays - isOverAnnotation:', isOverAnnotation, 'annotationChanged:', annotationChanged);
+        deps.clearHtmlOverlays('mouse-guide-annotation-change');
       }
 
       if (isOverAnnotation) {
@@ -536,8 +647,8 @@ export function useMouseGuide(
 
       if (mouseLineEnabled.value) {
         intersections = orientation === 'vertical'
-          ? deps.getAnnotationsIntersectingVerticalLine(x, overlayCtx)
-          : deps.getAnnotationsIntersectingHorizontalLine(y, overlayCtx);
+          ? deps.getAnnotationsIntersectingVerticalLine(x, annotationCtx)
+          : deps.getAnnotationsIntersectingHorizontalLine(y, annotationCtx);
 
         overlayCtx.save();
         overlayCtx.strokeStyle = options.value.mouseLineColor;
@@ -553,10 +664,14 @@ export function useMouseGuide(
         overlayCtx.stroke();
         overlayCtx.restore();
       }
+
+      // Update tracking variables
+      previousMouseLinePosition = mouseLineEnabled.value ? { x, y, orientation } : null;
+      previousHoverAnnotation = currentAnnotation;
     } else if (mouseLineEnabled.value) {
       intersections = orientation === 'vertical'
-        ? deps.getAnnotationsIntersectingVerticalLine(x, overlayCtx)
-        : deps.getAnnotationsIntersectingHorizontalLine(y, overlayCtx);
+        ? deps.getAnnotationsIntersectingVerticalLine(x, annotationCtx)
+        : deps.getAnnotationsIntersectingHorizontalLine(y, annotationCtx);
     }
 
     previousHoverState.value = isOverAnnotation;
@@ -638,8 +753,14 @@ export function useMouseGuide(
 
     const overlayCtx = overlayCanvas.getContext('2d');
     if (overlayCtx) {
+      // For mouse leave, we do a full clear since we're resetting everything
       overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
     }
+
+    // Reset dirty region tracking when mouse leaves
+    dirtyRegion = null;
+    previousMouseLinePosition = null;
+    previousHoverAnnotation = null;
 
     deps.clearHtmlOverlays();
     previousHoverState.value = false;
@@ -659,13 +780,18 @@ export function useMouseGuide(
     }
   };
 
-  // Cleanup function for RAF resources
+  // Cleanup function for RAF resources and dirty region tracking
   const cleanup = () => {
     if (rafId !== null) {
       cancelAnimationFrame(rafId);
       rafId = null;
       pendingMouseEvent = null;
     }
+
+    // Reset dirty region tracking
+    dirtyRegion = null;
+    previousMouseLinePosition = null;
+    previousHoverAnnotation = null;
   };
 
   return {

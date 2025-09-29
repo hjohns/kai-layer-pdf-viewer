@@ -123,29 +123,96 @@ export function usePdf(
   const pageUrls = ref<string[]>([]);
   const metadata = ref({ format: '', modDate: '', author: '' });
   const canvasRef = ref<HTMLCanvasElement | null>(null);
+  const annotationCanvasRef = ref<HTMLCanvasElement | null>(null);
   const overlayCanvasRef = ref<HTMLCanvasElement | null>(null);
   const htmlOverlayContainer = ref<HTMLElement | null>(null);
-  
+
+  // Optimized HTML overlay lifecycle management (defined before usePdfAnnotations)
+  const activeOverlays = new Map<string, HTMLElement>();
+  const overlayPool: HTMLElement[] = [];
+  const MAX_POOL_SIZE = 20;
+
+  const createOverlayElement = (): HTMLElement => {
+    // Try to reuse from pool first
+    const pooledElement = overlayPool.pop();
+    if (pooledElement) {
+      // Reset pooled element
+      pooledElement.innerHTML = '';
+      pooledElement.className = 'pdf-simple-html-overlay';
+      pooledElement.style.cssText = '';
+      return pooledElement;
+    }
+
+    // Create new element if pool is empty
+    const overlay = document.createElement('div');
+    overlay.className = 'pdf-simple-html-overlay';
+    return overlay;
+  };
+
+  const recycleOverlayElement = (element: HTMLElement) => {
+    if (overlayPool.length < MAX_POOL_SIZE) {
+      // Remove all event listeners by cloning the element
+      const cleanElement = element.cloneNode(true) as HTMLElement;
+      overlayPool.push(cleanElement);
+    }
+  };
+
+  const addTrackedOverlay = (id: string, element: HTMLElement) => {
+    // Remove existing overlay with same ID if it exists
+    const existing = activeOverlays.get(id);
+    if (existing) {
+      existing.remove();
+      recycleOverlayElement(existing);
+    }
+
+    activeOverlays.set(id, element);
+  };
+
+  const clearHtmlOverlays = (reason?: string) => {
+    if (!htmlOverlayContainer.value) return;
+
+    // Use tracked overlays instead of DOM queries for better performance
+    const overlayCount = activeOverlays.size;
+
+    if (overlayCount > 0) {
+      console.log('[HTML Overlays] Clearing', overlayCount, 'overlays, reason:', reason || 'unknown');
+      console.trace('[HTML Overlays] Clear stack trace');
+
+      activeOverlays.forEach((overlay, id) => {
+        console.log('[HTML Overlays] Removing overlay:', id, overlay);
+        overlay.remove();
+        recycleOverlayElement(overlay);
+      });
+
+      activeOverlays.clear();
+    } else {
+      console.debug('[HTML Overlays] Cleared', overlayCount, 'overlays, pool size:', overlayPool.length, 'reason:', reason || 'unknown');
+    }
+  };
+
   // Initialize annotations with canvas and overlay container refs
-  const { 
-    pageAnnotations, 
-    selectedAnnotation, 
-    showDialog, 
-    loadAnnotations, 
+  const {
+    pageAnnotations,
+    selectedAnnotation,
+    showDialog,
+    loadAnnotations,
     initializePdfCoordinates,
-    drawAnnotations, 
-    handleAnnotationClick, 
-    handleAnnotationHover, 
-    drawHoverEffect, 
+    drawAnnotations,
+    handleAnnotationClick,
+    handleAnnotationHover,
+    drawHoverEffect,
     drawAnnotationText,
-    clearAnnotations, 
-    closeDialog, 
+    clearAnnotations,
+    closeDialog,
     selectedAnnotationContent,
     cleanupProviders,
     getAnnotationAtPoint,
     getAnnotationsIntersectingVerticalLine,
     getAnnotationsIntersectingHorizontalLine
-  } = usePdfAnnotations(canvasRef, htmlOverlayContainer, htmlAnnotation, onOverlayClick);
+  } = usePdfAnnotations(annotationCanvasRef, htmlOverlayContainer, htmlAnnotation, onOverlayClick, {
+    createOverlayElement,
+    addTrackedOverlay
+  });
 
   const dynamicAnnotationFetcher = ref<AnnotationFetcher | null>(
     options.annotationFetcher ?? null
@@ -415,6 +482,13 @@ export function usePdf(
         console.log('Image loaded, dimensions:', img.width, 'x', img.height);
         canvasRef.value!.width = img.width;
         canvasRef.value!.height = img.height;
+        if (annotationCanvasRef.value) {
+          annotationCanvasRef.value.width = img.width;
+          annotationCanvasRef.value.height = img.height;
+          annotationCanvasRef.value.style.transform = `scale(${zoom.value})`;
+          annotationCanvasRef.value.style.transformOrigin = 'top center';
+        }
+
         if (overlayCanvasRef.value) {
           overlayCanvasRef.value.width = img.width;
           overlayCanvasRef.value.height = img.height;
@@ -426,13 +500,27 @@ export function usePdf(
         ctx.drawImage(img, 0, 0);
         console.log('Image drawn to canvas');
   
-        // Draw annotations using the composable
-        const PDF_POINTS_PER_INCH = 72;
-        const SCALE_FACTOR = 1;
-        const effectiveDpi = baseScale * PDF_POINTS_PER_INCH * SCALE_FACTOR;
-        
-        drawAnnotations(ctx, pageNumber, effectiveDpi);
-        console.log('Annotations drawn');
+        // Draw annotations on dedicated annotation canvas
+        if (annotationCanvasRef.value) {
+          const annotationCtx = annotationCanvasRef.value.getContext('2d');
+          if (annotationCtx) {
+            // Clear previous annotations from the dedicated layer
+            annotationCtx.clearRect(0, 0, annotationCanvasRef.value.width, annotationCanvasRef.value.height);
+
+            const PDF_POINTS_PER_INCH = 72;
+            const SCALE_FACTOR = 1;
+            const effectiveDpi = baseScale * PDF_POINTS_PER_INCH * SCALE_FACTOR;
+
+            console.log('[PDF Display] About to draw annotations - pageNumber:', pageNumber, 'effectiveDpi:', effectiveDpi);
+            console.log('[PDF Display] Annotation canvas dimensions:', annotationCanvasRef.value.width, 'x', annotationCanvasRef.value.height);
+            drawAnnotations(annotationCtx, pageNumber, effectiveDpi);
+            console.log('[PDF Display] Annotations drawn on dedicated layer');
+          } else {
+            console.error('[PDF Display] Could not get annotation canvas context');
+          }
+        } else {
+          console.error('[PDF Display] Annotation canvas ref is null');
+        }
       };
       img.src = url;
     } catch (err) {
@@ -512,21 +600,13 @@ export function usePdf(
       }
     }
   };
-  
-  // Function to clear HTML overlays
-  const clearHtmlOverlays = () => {
-    if (htmlOverlayContainer.value) {
-      const overlays = htmlOverlayContainer.value.querySelectorAll('.pdf-simple-html-overlay');
-      overlays.forEach(overlay => overlay.remove());
-      console.log('[HTML Overlays] Cleared', overlays.length, 'overlays');
-    }
-  };
 
   const {
     handleMouseMove,
     handleMouseLeave,
     updateMouseGuideOptions,
-    resetMouseLinePayload
+    resetMouseLinePayload,
+    cleanup: cleanupMouseGuide
   } = useMouseGuide(
     {
       canvasRef,
@@ -538,7 +618,8 @@ export function usePdf(
       clearHtmlOverlays,
       getAnnotationsIntersectingVerticalLine,
       getAnnotationsIntersectingHorizontalLine,
-      htmlOverlayContainer
+      htmlOverlayContainer,
+      annotationCanvasRef // Add annotation canvas reference
     },
     initialMouseLineOptions
   );
@@ -560,6 +641,15 @@ export function usePdf(
     }
   };
 
+  const clearAnnotationCanvas = () => {
+    if (annotationCanvasRef.value) {
+      const ctx = annotationCanvasRef.value.getContext('2d');
+      if (ctx) {
+        ctx.clearRect(0, 0, annotationCanvasRef.value.width, annotationCanvasRef.value.height);
+      }
+    }
+  };
+
   // Cleanup methods
   const cleanupPageUrls = () => {
     pageUrls.value.forEach(url => URL.revokeObjectURL(url));
@@ -574,8 +664,15 @@ export function usePdf(
     cleanupPageUrls();
     clearAnnotations();
     resetAnnotationCache();
+    clearAnnotationCanvas();
     clearOverlayCanvas();
+    clearHtmlOverlays(); // Clear tracked overlays and recycle elements
     resetMouseLinePayload();
+    cleanupMouseGuide();
+
+    // Clear overlay pool on full cleanup
+    overlayPool.length = 0;
+    activeOverlays.clear();
   };
 
   // Computed properties
@@ -595,6 +692,7 @@ export function usePdf(
     metadata,
     workerInitialized,
     canvasRef,
+    annotationCanvasRef,
     overlayCanvasRef,
     htmlOverlayContainer,
 
@@ -632,6 +730,8 @@ export function usePdf(
     
     // HTML overlay management
     clearHtmlOverlays,
+    createOverlayElement,
+    addTrackedOverlay,
 
     // Computed
     canGoNext,
