@@ -330,6 +330,13 @@ const toMouseLineOptions = (config?: MouseLinePropConfig) => ({
       console.error("Error during component cleanup:", e);
     }
   });
+
+  // Expose methods and state to parent components
+  defineExpose({
+    currentPage,
+    refreshAnnotationsForPage,
+    goToPage
+  });
   </script>
   
   <style scoped>

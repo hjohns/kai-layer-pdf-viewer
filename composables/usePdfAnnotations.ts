@@ -2,7 +2,10 @@ import { ref, computed, type Ref } from 'vue';
 import html2canvas from 'html2canvas';
 import type { OverlayAnnotation } from '@/types/annotations';
 import { usePdfCoordinates } from './usePdfCoordinates';
+import { useAnnotationGeometry } from './useAnnotationGeometry';
 import type { AnnotationPathData, AnnotationSpatialIndex } from './useAnnotationGeometry';
+import { useAnnotationStyling } from './useAnnotationStyling';
+import { useWordConfidenceVisualization } from './useWordConfidenceVisualization';
 
 // Custom annotation provider interfaces
 export interface AnnotationRenderContext {
@@ -100,6 +103,7 @@ export function usePdfAnnotations(
   // Get composable functions
   const geometryComposable = useAnnotationGeometry();
   const stylingComposable = useAnnotationStyling();
+  const wordConfidenceVisualization = useWordConfidenceVisualization();
 
   const {
     convertCoordinates,
@@ -112,6 +116,11 @@ export function usePdfAnnotations(
   } = geometryComposable;
 
   const { getConfidenceColors } = stylingComposable;
+  const {
+    showWordConfidenceVisualization,
+    clearWordConfidenceVisualization,
+    hasWordLevelConfidence
+  } = wordConfidenceVisualization;
 
   // State
   const pageAnnotations = ref<OverlayAnnotation[]>([]);
@@ -205,9 +214,15 @@ export function usePdfAnnotations(
 
     // Create a lookup map for geometry objects by their @id
     const geometryMap = new Map<string, any>();
+    // Create a lookup map for confidence span objects by their @id
+    const confidenceSpanMap = new Map<string, any>();
+
     data['@graph'].forEach((item: any) => {
       if (item['geo:asWKT']) {
         geometryMap.set(item['@id'], item);
+      }
+      if (item['di:confidence'] || item['di:offset'] || item['di:length']) {
+        confidenceSpanMap.set(item['@id'], item);
       }
     });
 
@@ -256,9 +271,66 @@ export function usePdfAnnotations(
 
       // Handle confidence spans in new format
       if (item['di:confidenceSpans']) {
-        const confidenceSpan = item['di:confidenceSpans'];
-        if (confidenceSpan['di:confidence']) {
-          semanticProperties.confidence = confidenceSpan['di:confidence']['@value'] || confidenceSpan['di:confidence'];
+        const confidenceSpansData = item['di:confidenceSpans'];
+
+        // Handle both single span and array of spans
+        const spans = Array.isArray(confidenceSpansData) ? confidenceSpansData : [confidenceSpansData];
+
+        // Extract confidence values from all spans
+        const confidenceValues: number[] = [];
+        spans.forEach((span: any) => {
+          if (span['@id']) {
+            // Reference to confidence span object
+            const confidenceSpanObj = confidenceSpanMap.get(span['@id']);
+            if (confidenceSpanObj && confidenceSpanObj['di:confidence']) {
+              const confValue = confidenceSpanObj['di:confidence']['@value'] || confidenceSpanObj['di:confidence'];
+              if (typeof confValue === 'number' || typeof confValue === 'string') {
+                confidenceValues.push(typeof confValue === 'string' ? parseFloat(confValue) : confValue);
+              }
+            }
+          } else if (span['di:confidence']) {
+            // Direct confidence value (fallback for other formats)
+            const confValue = span['di:confidence']['@value'] || span['di:confidence'];
+            if (typeof confValue === 'number' || typeof confValue === 'string') {
+              confidenceValues.push(typeof confValue === 'string' ? parseFloat(confValue) : confValue);
+            }
+          }
+        });
+
+        // Store confidence data
+        if (confidenceValues.length > 0) {
+          // For backward compatibility, store the first/average confidence as the main confidence
+          semanticProperties.confidence = confidenceValues[0];
+          // Also store all confidence values for advanced use cases
+          semanticProperties.confidenceValues = confidenceValues;
+          semanticProperties.confidenceSpansCount = confidenceValues.length;
+
+          // Store detailed span information for word-level visualization
+          const detailedSpans: Array<{
+            offset: number;
+            length: number;
+            confidence: number;
+            text?: string;
+          }> = [];
+
+          spans.forEach((span: any) => {
+            if (span['@id']) {
+              const confidenceSpanObj = confidenceSpanMap.get(span['@id']);
+              if (confidenceSpanObj) {
+                const offset = parseInt(confidenceSpanObj['di:offset']?.['@value'] || confidenceSpanObj['di:offset'] || 0);
+                const length = parseInt(confidenceSpanObj['di:length']?.['@value'] || confidenceSpanObj['di:length'] || 0);
+                const confidence = parseFloat(confidenceSpanObj['di:confidence']?.['@value'] || confidenceSpanObj['di:confidence'] || 0);
+
+                if (!isNaN(offset) && !isNaN(length) && !isNaN(confidence)) {
+                  // Extract the text for this span
+                  const text = content.substring(offset, offset + length);
+                  detailedSpans.push({ offset, length, confidence, text });
+                }
+              }
+            }
+          });
+
+          semanticProperties.confidenceSpans = detailedSpans.sort((a, b) => a.offset - b.offset);
         }
       }
 
@@ -1151,6 +1223,44 @@ export function usePdfAnnotations(
     annotationProviders.value.set('default', defaultProvider);
   }
 
+  // Helper function to trigger word-level confidence visualization
+  const triggerWordConfidenceVisualization = (
+    annotation: OverlayAnnotation,
+    path: Path2D,
+    canvas: HTMLCanvasElement,
+    effectiveDpi: number
+  ) => {
+    // Calculate the annotation bounds in canvas coordinates
+    const points = convertCoordinates(annotation.rect, effectiveDpi);
+
+    if (points.length === 0) return;
+
+    const xs = points.map(p => p[0]);
+    const ys = points.map(p => p[1]);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+
+    // Convert canvas coordinates to overlay coordinates
+    // The HTML overlay container is positioned at (0,0) relative to the canvas
+    const canvasRect = canvas.getBoundingClientRect();
+    const scaleX = canvasRect.width / canvas.width;
+    const scaleY = canvasRect.height / canvas.height;
+
+    const screenRect = {
+      left: minX * scaleX,
+      top: minY * scaleY,
+      width: (maxX - minX) * scaleX,
+      height: (maxY - minY) * scaleY
+    };
+
+    // Show word confidence visualization in HTML overlay
+    if (htmlOverlayContainer.value) {
+      showWordConfidenceVisualization(annotation, htmlOverlayContainer.value, screenRect);
+    }
+  };
+
   // Draw hover effect
   const drawHoverEffect = async (ctx: CanvasRenderingContext2D, x: number, y: number, effectiveDpi: number) => {
     const annotation = getAnnotationAtPoint(x, y, ctx);
@@ -1169,11 +1279,17 @@ export function usePdfAnnotations(
         ctx.stroke(path);
         ctx.restore();
         
-        // Draw annotation text - always try to draw, regardless of orientation
-        try {
-          await drawAnnotationText(ctx, annotation, effectiveDpi);
-        } catch (error) {
-          console.warn('Error drawing annotation text:', error);
+        // Check if we have word-level confidence data
+        if (hasWordLevelConfidence(annotation)) {
+          // Trigger word-level confidence visualization in HTML overlay
+          triggerWordConfidenceVisualization(annotation, path, ctx.canvas, effectiveDpi);
+        } else {
+          // Draw annotation text - always try to draw, regardless of orientation
+          try {
+            await drawAnnotationText(ctx, annotation, effectiveDpi);
+          } catch (error) {
+            console.warn('Error drawing annotation text:', error);
+          }
         }
       }
     }
@@ -1376,7 +1492,11 @@ export function usePdfAnnotations(
     
     // Debug utilities
     disableFallbackRendering,
-    
+
+    // Word Confidence Visualization
+    clearWordConfidenceVisualization,
+    hasWordLevelConfidence,
+
     // Test function for coordinate debugging
     testCoordinateConversion: pdfCoords.testCoordinateConversion
   };

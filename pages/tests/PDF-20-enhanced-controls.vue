@@ -2,8 +2,15 @@
 import type { AnnotationFetcher } from '@/composables/usePdf';
 import type { OverlayAnnotation } from '@/types/annotations';
 import type { MouseLineIntersectionContext } from '@/composables/useMouseGuide';
+import type { AnnotationRenderContext } from '@/composables/usePdf';
 
 const { addLog } = useLog();
+const { getConfidenceColors } = useAnnotationStyling();
+const {
+  showWordConfidenceVisualization,
+  clearWordConfidenceVisualization,
+  hasWordLevelConfidence
+} = useWordConfidenceVisualization();
 const SPARQL_ENDPOINT = 'https://ecass-fuseki.agreeablemoss-36d29f99.australiaeast.azurecontainerapps.io/confidence/query';
 const SPARQL_UPDATE_ENDPOINT = 'https://ecass-fuseki.agreeablemoss-36d29f99.australiaeast.azurecontainerapps.io/confidence/update';
 
@@ -47,6 +54,10 @@ const intersectingOverlays = ref<OverlayAnnotation[]>([]);
 const mouseLineX = ref<number | null>(null);
 const lastIntersectedIds = ref<string[]>([]);
 const showAllVersions = ref(false);
+
+// New control states
+const lineMode = ref<'vertical' | 'horizontal' | 'none'>('vertical');
+const showConfidenceColors = ref(true);
 
 const fetchAnnotations: AnnotationFetcher = async (pageNumber) => {
   addLog(`Fetching JSON-LD annotations from Fuseki for page ${pageNumber}`);
@@ -183,7 +194,15 @@ const handleCanvasClick = (context: { x: number; y: number; pageNumber: number }
 };
 
 const handleMouseLineIntersections = (context: MouseLineIntersectionContext) => {
-  if (context.orientation !== 'vertical') {
+  // Early return for disabled lines or mismatched orientation
+  if (lineMode.value === 'none' ||
+      (lineMode.value === 'vertical' && context.orientation !== 'vertical') ||
+      (lineMode.value === 'horizontal' && context.orientation !== 'horizontal')) {
+    return;
+  }
+
+  // Only process if context has valid data
+  if (!context.overlays || !Array.isArray(context.overlays)) {
     return;
   }
 
@@ -191,29 +210,34 @@ const handleMouseLineIntersections = (context: MouseLineIntersectionContext) => 
   const hasChanged = ids.length !== lastIntersectedIds.value.length ||
     ids.some((id, index) => id !== lastIntersectedIds.value[index]);
 
-  intersectingOverlays.value = context.overlays;
+  // Only update reactive values if something actually changed
+  if (hasChanged) {
+    intersectingOverlays.value = context.overlays;
+    lastIntersectedIds.value = ids;
+  }
+
   const normalizedX = Number.isFinite(context.x) ? context.x : null;
   mouseLineX.value = normalizedX;
 
-  if (normalizedX === null) {
-    lastIntersectedIds.value = ids;
+  if (normalizedX === null || !hasChanged) {
     return;
   }
 
-  if (hasChanged) {
-    lastIntersectedIds.value = ids;
-
-    if (ids.length) {
-      addLog(`📐 Line at x=${normalizedX.toFixed(1)} intersects ${ids.length} overlay(s)`);
-      context.overlays.forEach(annotation => {
-        const isRevision = annotation.semanticProperties?.wasRevisionOf ? ' [REVISION]' : '';
-        addLog(`   • ${annotation.content}${isRevision}`);
-      });
-    } else {
-      addLog(`📐 Line at x=${normalizedX.toFixed(1)} intersects no overlays`);
+  // Throttle logging to reduce DOM updates
+  if (ids.length) {
+    addLog(`📐 ${lineMode.value} line at ${context.orientation === 'vertical' ? 'x' : 'y'}=${normalizedX.toFixed(1)} intersects ${ids.length} overlay(s)`);
+    // Only log first few overlays to reduce overhead
+    context.overlays.slice(0, 5).forEach(annotation => {
+      const isRevision = annotation.semanticProperties?.wasRevisionOf ? ' [REVISION]' : '';
+      addLog(`   • ${annotation.content}${isRevision}`);
+    });
+    if (context.overlays.length > 5) {
+      addLog(`   ... and ${context.overlays.length - 5} more`);
     }
-    addLog('─'.repeat(50));
+  } else {
+    addLog(`📐 ${lineMode.value} line intersects no overlays`);
   }
+  addLog('─'.repeat(50));
 };
 
 const closeEditForm = () => {
@@ -266,9 +290,9 @@ const submitCellEdit = async () => {
       addLog(`📦 Original cell remains unchanged, new revision cell created with provenance`);
 
       // Refresh annotations to show the new revision
-      if (pdfViewerRef.value && pdfViewerRef.value.refreshAnnotations) {
+      if (pdfViewerRef.value?.refreshAnnotationsForPage) {
         addLog(`🔄 Refreshing annotations to show new revision...`);
-        await pdfViewerRef.value.refreshAnnotations();
+        await pdfViewerRef.value.refreshAnnotationsForPage();
       }
     }
   } catch (error) {
@@ -285,41 +309,191 @@ const toggleVersionView = async () => {
   addLog(`🔄 Switching to ${showAllVersions.value ? 'all versions' : 'latest only'} view`);
 
   // Refresh annotations with new view
-  if (pdfViewerRef.value && pdfViewerRef.value.refreshAnnotations) {
-    await pdfViewerRef.value.refreshAnnotations();
+  if (pdfViewerRef.value?.refreshAnnotationsForPage) {
+    await pdfViewerRef.value.refreshAnnotationsForPage();
   }
 };
 
 const refreshData = async () => {
   addLog(`🔄 Manually refreshing annotations from database...`);
 
-  // Force a re-fetch by calling our fetchAnnotations function directly
-  // This will re-run the SPARQL query for the current page
   try {
-    if (pdfViewerRef.value?.currentPage !== undefined) {
-      const currentPageNumber = pdfViewerRef.value.currentPage + 1; // currentPage is 0-indexed
-      addLog(`🔍 Refreshing annotations for page ${currentPageNumber}...`);
-
-      const refreshedData = await fetchAnnotations(currentPageNumber);
-      addLog(`✅ Fetched fresh data from database`, refreshedData);
-
-      // Trigger a component re-render by navigating to the same page
-      // This will cause the PDF viewer to re-process the annotations
-      if (pdfViewerRef.value.goToPage) {
-        await pdfViewerRef.value.goToPage(pdfViewerRef.value.currentPage);
-        addLog(`✅ Refresh completed - page re-rendered with fresh data`);
-      } else {
-        addLog(`⚠️ Data fetched but couldn't trigger page refresh`);
-      }
-    } else {
-      addLog(`❌ Could not determine current page number`);
+    if (!pdfViewerRef.value) {
+      addLog(`❌ PDF viewer reference not available`);
+      return;
     }
+
+    // Trigger a re-render by calling refreshAnnotationsForPage (uses current page by default)
+    await pdfViewerRef.value.refreshAnnotationsForPage();
+    addLog(`✅ Refresh completed - page re-rendered with fresh data`);
   } catch (error) {
     addLog(`❌ Error during refresh: ${error}`);
   }
 };
 
+// New control functions with throttling
+let lastToggleTime = 0;
+const TOGGLE_THROTTLE_MS = 150;
+
+const toggleLineMode = () => {
+  const now = Date.now();
+  if (now - lastToggleTime < TOGGLE_THROTTLE_MS) return;
+  lastToggleTime = now;
+
+  const modes: Array<'vertical' | 'horizontal' | 'none'> = ['vertical', 'horizontal', 'none'];
+  const currentIndex = modes.indexOf(lineMode.value);
+  lineMode.value = modes[(currentIndex + 1) % modes.length];
+  addLog(`📐 Line mode changed to: ${lineMode.value}`);
+};
+
+const toggleConfidenceColors = async () => {
+  const now = Date.now();
+  if (now - lastToggleTime < TOGGLE_THROTTLE_MS) return;
+  lastToggleTime = now;
+
+  showConfidenceColors.value = !showConfidenceColors.value;
+  addLog(`🎨 Confidence colors ${showConfidenceColors.value ? 'enabled' : 'disabled'}`);
+
+  // Force a re-render by refreshing annotations
+  if (pdfViewerRef.value?.refreshAnnotationsForPage) {
+    await pdfViewerRef.value.refreshAnnotationsForPage();
+  }
+};
+
+// Cached mouse line configurations to avoid object recreation
+const mouseLineConfigs = {
+  none: { enabled: false },
+  vertical: {
+    enabled: true,
+    color: 'rgba(249, 115, 22, 0.8)',
+    width: 2,
+    tooltips: true,
+    orientation: 'vertical'
+  },
+  horizontal: {
+    enabled: true,
+    color: 'rgba(249, 115, 22, 0.8)',
+    width: 2,
+    tooltips: true,
+    orientation: 'horizontal'
+  }
+} as const;
+
+// Computed mouse line configuration
+const mouseLineConfig = computed(() => mouseLineConfigs[lineMode.value]);
+
+// HTML annotation function for confidence colors - make it reactive
+const createConfidenceAnnotation = computed(() => {
+  console.log('🏷️ createConfidenceAnnotation computed function created, showConfidenceColors:', showConfidenceColors.value);
+
+  return (context: AnnotationRenderContext, annotation: OverlayAnnotation): string => {
+    console.log('🏷️ createConfidenceAnnotation called:', {
+      showConfidenceColors: showConfidenceColors.value,
+      annotationContent: annotation.content,
+      confidence: annotation.semanticProperties?.confidence
+    });
+
+    // TEMPORARY TEST: Always return something to see if HTML annotation works
+    if (!showConfidenceColors.value) {
+      console.log('🏷️ Confidence colors disabled, returning test HTML');
+      return `<div style="background: red; color: white; padding: 2px;">TEST: ${annotation.content}</div>`;
+    }
+
+    const colors = getConfidenceColors(annotation);
+    const confidence = annotation.semanticProperties?.confidence;
+    const confidencePercent = confidence ? (confidence * 100).toFixed(1) : 'N/A';
+    const hasWordLevel = hasWordLevelConfidence(annotation);
+
+    console.log('🏷️ Applying confidence colors:', {
+      colors,
+      confidencePercent,
+      hasWordLevel,
+      content: annotation.content
+    });
+
+    return `<div
+      style="
+        background-color: ${colors.fill};
+        border: 2px solid ${colors.stroke};
+        padding: 4px 6px;
+        border-radius: 3px;
+        font-size: 12px;
+        font-weight: 600;
+        color: #1f2937;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+        min-height: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        word-break: break-word;
+        ${hasWordLevel ? 'cursor: pointer;' : ''}
+      "
+      title="Cell Confidence: ${confidencePercent}%${hasWordLevel ? ' • Hover for word-level details' : ''}"
+      class="confidence-annotation ${hasWordLevel ? 'has-word-confidence' : ''}"
+      data-annotation-id="${annotation['@id'] || 'unknown'}"
+      onmouseenter="if (window.handleConfidenceHover) window.handleConfidenceHover(this, true)"
+      onmouseleave="if (window.handleConfidenceHover) window.handleConfidenceHover(this, false)"
+    >
+      ${annotation.content || ''}
+    </div>`;
+  };
+});
+
+// Global hover handler for word-level confidence visualization
+const handleConfidenceHover = (element: HTMLElement, isEntering: boolean) => {
+  console.log('🖱️ handleConfidenceHover called:', {
+    isEntering,
+    showConfidenceColors: showConfidenceColors.value,
+    element: element.textContent?.substring(0, 20)
+  });
+
+  if (!showConfidenceColors.value) {
+    console.log('🖱️ Confidence colors disabled, skipping hover');
+    return; // Don't show word-level if confidence colors are disabled
+  }
+
+  if (isEntering) {
+    // Find the corresponding annotation
+    const annotationId = element.dataset.annotationId;
+    console.log('🖱️ Looking for annotation ID:', annotationId);
+    if (!annotationId) return;
+
+    // Get the current page annotations and find the matching one
+    if (pdfViewerRef.value?.pageAnnotations) {
+      const annotation = pdfViewerRef.value.pageAnnotations.find((ann: OverlayAnnotation) => ann['@id'] === annotationId);
+      console.log('🖱️ Found annotation:', annotation ? annotation.content : 'NOT FOUND');
+      if (annotation && hasWordLevelConfidence(annotation)) {
+        console.log('🖱️ Showing word confidence visualization');
+        const rect = element.getBoundingClientRect();
+        const container = element.closest('.pdf-page-container') as HTMLElement;
+        if (container) {
+          showWordConfidenceVisualization(annotation, container, rect);
+        } else {
+          console.log('🖱️ No container found');
+        }
+      } else {
+        console.log('🖱️ No word-level confidence available');
+      }
+    } else {
+      console.log('🖱️ No page annotations available');
+    }
+  } else {
+    console.log('🖱️ Clearing word confidence visualization');
+    clearWordConfidenceVisualization();
+  }
+};
+
 onMounted(() => {
+  // Set up global hover handler
+  (window as any).handleConfidenceHover = handleConfidenceHover;
+  console.log('🏗️ Component mounted, showConfidenceColors:', showConfidenceColors.value);
+
+  // Watch for changes to showConfidenceColors
+  watch(showConfidenceColors, (newValue, oldValue) => {
+    console.log('📊 showConfidenceColors changed:', { oldValue, newValue });
+  });
+
   nextTick(() => {
     setTimeout(() => {
       if (pdfViewerRef.value && pdfViewerRef.value.goToPage) {
@@ -329,15 +503,47 @@ onMounted(() => {
     }, 2000);
   });
 });
+
+onUnmounted(() => {
+  // Clean up global handler
+  delete (window as any).handleConfidenceHover;
+  clearWordConfidenceVisualization();
+});
 </script>
 
 <template>
   <TestPanel
-    heading="Cell Revision Test (Lightweight Provenance)"
-    description="Click on cell overlays to create revisions using PROV wasRevisionOf pattern. Original cells remain unchanged."
+    heading="Enhanced Controls Test"
+    description="Cell revision test with enhanced controls for line guides and confidence visualization."
   >
     <template #inputs>
-      <div class="flex gap-2 mb-4">
+      <!-- Enhanced Control Buttons -->
+      <div class="flex gap-2 mb-4 flex-wrap">
+        <!-- Line Mode Toggle Button -->
+        <Button
+          variant="outline"
+          size="sm"
+          @click="toggleLineMode"
+          :class="{
+            'bg-orange-100 border-orange-300': lineMode === 'vertical',
+            'bg-blue-100 border-blue-300': lineMode === 'horizontal',
+            'bg-gray-100 border-gray-300': lineMode === 'none'
+          }"
+        >
+          {{ lineMode === 'vertical' ? '│ Vertical' : lineMode === 'horizontal' ? '── Horizontal' : '✕ No Line' }}
+        </Button>
+
+        <!-- Confidence Colors Toggle Button -->
+        <Button
+          variant="outline"
+          size="sm"
+          @click="toggleConfidenceColors"
+          :class="{ 'bg-green-100 border-green-300': showConfidenceColors }"
+        >
+          {{ showConfidenceColors ? '🎨 Hide Colors' : '🎨 Show Colors' }}
+        </Button>
+
+        <!-- Original Buttons -->
         <Button
           variant="outline"
           size="sm"
@@ -363,8 +569,9 @@ onMounted(() => {
       :annotation-fetcher="fetchAnnotations"
       @overlay-click="handleOverlayClick"
       @canvas-click="handleCanvasClick"
-      :mouse-line="{ enabled: true, color: 'rgba(249, 115, 22, 0.8)', width: 2, tooltips: true }"
+      :mouse-line="mouseLineConfig"
       @mouse-line-intersections="handleMouseLineIntersections"
+      :html-annotation="showConfidenceColors ? ((ctx, ann) => `<div style='background: red; color: white; padding: 4px;'>TEST</div>`) : undefined"
     />
 
     <!-- Edit Form Modal -->
@@ -418,14 +625,21 @@ onMounted(() => {
 
     <div class="mt-4 space-y-2">
       <p class="text-sm text-muted-foreground">
-        Click on any cell overlay to create a revision. Original cells remain unchanged. Use the toggle to view all versions or latest only.
+        Click on any cell overlay to create a revision. Original cells remain unchanged. Use the enhanced controls above to customize the viewing experience.
       </p>
+      <div class="text-sm text-muted-foreground">
+        <div><strong>Line Mode:</strong> {{ lineMode === 'vertical' ? 'Vertical guide line' : lineMode === 'horizontal' ? 'Horizontal guide line' : 'No guide line' }}</div>
+        <div><strong>Confidence Colors:</strong> {{ showConfidenceColors ? 'Showing confidence-based colors' : 'Standard overlay colors' }}</div>
+      </div>
       <p class="text-sm text-muted-foreground">
-        <template v-if="mouseLineX !== null">
-          Vertical line at x={{ mouseLineX.toFixed(1) }} intersects {{ intersectingOverlays.length }} overlay(s).
+        <template v-if="mouseLineX !== null && lineMode !== 'none'">
+          {{ lineMode === 'vertical' ? 'Vertical' : 'Horizontal' }} line at {{ lineMode === 'vertical' ? 'x' : 'y' }}={{ mouseLineX.toFixed(1) }} intersects {{ intersectingOverlays.length }} overlay(s).
+        </template>
+        <template v-else-if="lineMode === 'none'">
+          Guide lines are disabled. Enable them using the line mode button above.
         </template>
         <template v-else>
-          Move the mouse over the PDF to inspect overlays with the vertical guide.
+          Move the mouse over the PDF to inspect overlays with the {{ lineMode }} guide.
         </template>
       </p>
       <ul v-if="intersectingOverlays.length" class="list-disc pl-5 text-sm leading-6">

@@ -9,12 +9,24 @@ const handleOverlayClick = (overlay: OverlayAnnotation) => {
   const iri = overlay['@id'] || 'No IRI';
   const row = overlay.semanticProperties?.rowIndex || 'Unknown';
   const column = overlay.semanticProperties?.columnIndex || 'Unknown';
-  const confidence = overlay.semanticProperties?.confidence || 'Unknown';
+  const confidence = overlay.semanticProperties?.confidence;
+  const confidenceValues = overlay.semanticProperties?.confidenceValues;
+  const confidenceSpansCount = overlay.semanticProperties?.confidenceSpansCount;
 
   addLog(`🔗 CELL CLICKED: "${overlay.content}"`);
   addLog(`📋 IRI: ${iri}`);
   addLog(`📍 Position: Row ${row}, Column ${column}`);
-  addLog(`🎯 Confidence: ${confidence}`);
+
+  // Display confidence information based on what's available
+  if (confidenceValues && confidenceValues.length > 1) {
+    addLog(`🎯 Confidence Spans (${confidenceSpansCount}): [${confidenceValues.map(v => v.toFixed(3)).join(', ')}]`);
+    addLog(`🎯 Primary Confidence: ${confidence?.toFixed(3) || 'Unknown'}`);
+  } else if (confidence !== undefined) {
+    addLog(`🎯 Confidence: ${typeof confidence === 'number' ? confidence.toFixed(3) : confidence}`);
+  } else {
+    addLog(`🎯 Confidence: Unknown`);
+  }
+
   addLog(`🏷️  Type: ${overlay['@type'] || 'Unknown'}`);
   addLog(`📊 Full semantic data:`, overlay.semanticProperties);
   addLog('─'.repeat(50));

@@ -171,6 +171,9 @@ export function usePdf(
   const clearHtmlOverlays = (reason?: string) => {
     if (!htmlOverlayContainer.value) return;
 
+    // Clear word confidence visualization
+    clearWordConfidenceVisualization();
+
     // Use tracked overlays instead of DOM queries for better performance
     const overlayCount = activeOverlays.size;
 
@@ -208,7 +211,9 @@ export function usePdf(
     cleanupProviders,
     getAnnotationAtPoint,
     getAnnotationsIntersectingVerticalLine,
-    getAnnotationsIntersectingHorizontalLine
+    getAnnotationsIntersectingHorizontalLine,
+    clearWordConfidenceVisualization,
+    hasWordLevelConfidence
   } = usePdfAnnotations(annotationCanvasRef, htmlOverlayContainer, htmlAnnotation, onOverlayClick, {
     createOverlayElement,
     addTrackedOverlay
@@ -366,11 +371,12 @@ export function usePdf(
     }
   };
 
-  const refreshAnnotationsForPage = async (pageNumber: number) => {
-    const pageKey = pageNumber + 1;
+  const refreshAnnotationsForPage = async (pageNumber?: number) => {
+    const targetPage = pageNumber !== undefined ? pageNumber : currentPage.value;
+    const pageKey = targetPage + 1;
     annotationCache.value.delete(pageKey);
     updatePageAnnotationsFromCache();
-    return fetchAnnotationsForPage(pageNumber, { force: true });
+    return fetchAnnotationsForPage(targetPage, { force: true });
   };
 
   // Format PDF date strings
