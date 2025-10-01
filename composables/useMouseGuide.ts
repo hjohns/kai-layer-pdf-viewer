@@ -1,6 +1,7 @@
 import { ref, computed, shallowRef } from 'vue';
 import type { Ref } from 'vue';
 import type { OverlayAnnotation } from '@/types/annotations';
+import { useAnnotationGeometry } from '@/composables/useAnnotationGeometry';
 
 export type MouseLineOrientation = 'vertical' | 'horizontal';
 
@@ -63,7 +64,10 @@ interface TooltipEntry {
   left: number;
   top: number;
   rightEdge?: number;
+  leftEdge?: number;
   maxWidth?: number;
+  showOnLeft?: boolean;
+  showOnTop?: boolean;
 }
 
 export function useMouseGuide(
@@ -97,6 +101,7 @@ export function useMouseGuide(
     overlayIds: string[];
   } | null>(null);
   const tooltipHost = shallowRef<HTMLElement | null>(null);
+  const currentMousePosition = ref<{ x: number; y: number } | null>(null);
 
   // Performance optimization: throttle mouse events using RAF
   let rafId: number | null = null;
@@ -306,7 +311,7 @@ export function useMouseGuide(
     return `Row ${rowValue}, Col ${columnValue}`;
   };
 
-  const computeTooltipEntries = (overlays: OverlayAnnotation[]): TooltipEntry[] => {
+  const computeTooltipEntries = (overlays: OverlayAnnotation[], mouseX?: number, mouseY?: number): TooltipEntry[] => {
     if (!overlays.length) {
       return [];
     }
@@ -336,6 +341,12 @@ export function useMouseGuide(
     const entries: TooltipEntry[] = [];
     const orientation = mouseLineOrientation.value;
 
+    // Determine which side to show tooltips based on cursor position
+    // For vertical: if mouse is on right 50%, show tooltips on left
+    // For horizontal: if mouse is on bottom 50%, show tooltips on top
+    const showOnLeft = orientation === 'vertical' && mouseX !== undefined && (mouseX / overlayCanvas.width) > 0.5;
+    const showOnTop = orientation === 'horizontal' && mouseY !== undefined && (mouseY / overlayCanvas.height) > 0.5;
+
     for (const overlay of overlays) {
       const rect = overlay.rect || [];
       if (!rect.length) {
@@ -362,18 +373,25 @@ export function useMouseGuide(
       const id = overlay['@id'] || `${overlay.page}-${overlay.line}`;
 
       if (orientation === 'vertical') {
+        const displayLeftEdge = minX * scaleX;
         const displayRightEdge = maxX * scaleX;
         const displayCenterY = (minY + (maxY - minY) / 2) * scaleY;
+
+        // Use left edge if showing on left side, otherwise use right edge
+        const displayEdge = showOnLeft ? displayLeftEdge : displayRightEdge;
 
         entries.push({
           id,
           overlay,
           orientation,
-          left: displayRightEdge,
+          left: displayEdge,
           top: displayCenterY,
-          rightEdge: displayRightEdge
+          rightEdge: displayRightEdge,
+          leftEdge: displayLeftEdge,
+          showOnLeft
         });
       } else {
+        const displayTopEdge = minY * scaleY;
         const displayBottomEdge = maxY * scaleY;
         const displayCenterX = (minX + (maxX - minX) / 2) * scaleX;
         const overlayWidth = (maxX - minX) * scaleX;
@@ -389,13 +407,17 @@ export function useMouseGuide(
           return Math.min(Math.max(displayCenterX, minCenter), maxCenter);
         })();
 
+        // Use top edge if showing on top, otherwise use bottom edge + offset
+        const displayYPosition = showOnTop ? displayTopEdge - tooltipOffset : displayBottomEdge + tooltipOffset;
+
         entries.push({
           id,
           overlay,
           orientation,
           left: clampedCenter,
-          top: displayBottomEdge + tooltipOffset,
-          maxWidth: overlayWidth
+          top: displayYPosition,
+          maxWidth: overlayWidth,
+          showOnTop
         });
       }
     }
@@ -405,7 +427,10 @@ export function useMouseGuide(
     }
 
     if (orientation === 'vertical') {
-      const maxRightEdge = Math.max(...entries.map(entry => entry.rightEdge!));
+      // Determine the positioning edge based on whether we're showing on left or right
+      const isShowingOnLeft = entries.length > 0 && entries[0].showOnLeft;
+      const minLeftEdge = isShowingOnLeft ? Math.min(...entries.map(entry => entry.leftEdge!)) : 0;
+      const maxRightEdge = !isShowingOnLeft ? Math.max(...entries.map(entry => entry.rightEdge!)) : 0;
 
       entries.sort((a, b) => a.top - b.top);
 
@@ -444,7 +469,8 @@ export function useMouseGuide(
 
       entries.forEach((entry, index) => {
         entry.top = adjustedCenters[index];
-        entry.left = maxRightEdge + tooltipOffset;
+        // Position tooltips on left side (leftEdge - offset) or right side (rightEdge + offset)
+        entry.left = isShowingOnLeft ? minLeftEdge - tooltipOffset : maxRightEdge + tooltipOffset;
       });
     }
 
@@ -468,7 +494,8 @@ export function useMouseGuide(
     host.style.transform = '';
     host.style.transformOrigin = '';
 
-    const entries = computeTooltipEntries(overlays);
+    const mousePos = currentMousePosition.value;
+    const entries = computeTooltipEntries(overlays, mousePos?.x, mousePos?.y);
 
     if (!entries.length) {
       host.innerHTML = '';
@@ -489,9 +516,13 @@ export function useMouseGuide(
       wrapper.style.left = `${entry.left}px`;
       wrapper.style.top = `${entry.top}px`;
       if (entry.orientation === 'vertical') {
-        wrapper.style.transform = 'translateY(-50%)';
+        // For vertical: translateX(-100%) when showing on left, no horizontal translation when showing on right
+        // Always center vertically with translateY(-50%)
+        wrapper.style.transform = entry.showOnLeft ? 'translate(-100%, -50%)' : 'translateY(-50%)';
       } else {
-        wrapper.style.transform = 'translate(-50%, 0)';
+        // For horizontal: translateY(-100%) when showing on top, no vertical translation when showing on bottom
+        // Always center horizontally with translateX(-50%)
+        wrapper.style.transform = entry.showOnTop ? 'translate(-50%, -100%)' : 'translate(-50%, 0)';
       }
 
       const content = document.createElement('div');
@@ -584,6 +615,9 @@ export function useMouseGuide(
     const x = (event.clientX - rect.left) * scaleX;
     const y = (event.clientY - rect.top) * scaleY;
     const orientation = mouseLineOrientation.value;
+
+    // Store current mouse position for tooltip rendering
+    currentMousePosition.value = { x, y };
 
     const isOverAnnotation = deps.handleAnnotationHover(x, y, annotationCtx);
     const currentAnnotation = isOverAnnotation ? deps.getAnnotationAtPoint(x, y, annotationCtx) : null;

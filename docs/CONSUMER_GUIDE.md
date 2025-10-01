@@ -113,6 +113,32 @@ interface MouseLinePropConfig {
 }
 ```
 
+### Automatic Tooltip Side-Switching (New!)
+
+Tooltips now automatically switch sides based on cursor position to prevent them from going off-screen:
+
+- **Vertical lines**:
+  - Cursor on left 50% of canvas → tooltips display on the **right** (default)
+  - Cursor on right 50% of canvas → tooltips display on the **left**
+
+- **Horizontal lines**:
+  - Cursor on top 50% of canvas → tooltips display on the **bottom** (default)
+  - Cursor on bottom 50% of canvas → tooltips display on the **top**
+
+This behavior is **automatic** and requires no additional configuration. Just enable tooltips:
+
+```vue
+<PDFViewer
+  :mouse-line="{
+    enabled: true,
+    orientation: 'vertical',
+    tooltips: true  // ← Side-switching enabled automatically
+  }"
+/>
+```
+
+The side-switching ensures tooltips remain visible and don't extend beyond the canvas bounds, providing a better user experience when inspecting annotations near the edges of the document.
+
 ### What You Get From PDF-20
 
 PDF-20 provides:

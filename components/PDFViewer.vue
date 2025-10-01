@@ -93,7 +93,7 @@
   </template>
   
   <script setup lang="ts">
-import { watch, onMounted, onBeforeUnmount } from "vue";  
+import { watch, onMounted, onBeforeUnmount, nextTick } from "vue";  
 import { usePdf } from '@/composables/usePdf';
 
 import type { OverlayAnnotation } from '@/types/annotations';
@@ -115,13 +115,14 @@ interface MouseLinePropConfig {
   tooltips?: MouseLineTooltipProp;
 }
 
-const props = defineProps<{ 
-  overlays?: string | null, 
+const props = defineProps<{
+  overlays?: string | null,
   overlaysData?: unknown,
   annotationFetcher?: AnnotationFetcher | null,
   file: string,
   htmlAnnotation?: (context: AnnotationRenderContext, annotation: OverlayAnnotation) => string,
-  mouseLine?: MouseLinePropConfig
+  mouseLine?: MouseLinePropConfig,
+  page?: number
 }>();
 
 // Define events that the component can emit
@@ -318,9 +319,37 @@ const toMouseLineOptions = (config?: MouseLinePropConfig) => ({
     },
     { deep: true }
   );
-  
+
+  // Watch for page prop changes and navigate to the specified page
+  watch(
+    () => props.page,
+    (newPage) => {
+      if (newPage !== undefined && pdfDocument.value) {
+        // Convert 1-based page number to 0-based index
+        const pageIndex = newPage - 1;
+        if (pageIndex >= 0 && pageIndex < totalPages.value) {
+          goToPage(pageIndex);
+        }
+      }
+    }
+  );
+
   onMounted(() => {
     console.log("Component mounted, canvas ref:", canvasRef.value);
+
+    // Navigate to initial page if specified
+    if (props.page !== undefined) {
+      nextTick(() => {
+        setTimeout(() => {
+          if (pdfDocument.value) {
+            const pageIndex = props.page! - 1;
+            if (pageIndex >= 0 && pageIndex < totalPages.value) {
+              goToPage(pageIndex);
+            }
+          }
+        }, 500);
+      });
+    }
   });
   
   onBeforeUnmount(() => {
