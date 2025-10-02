@@ -265,11 +265,11 @@ const submitCellEdit = async () => {
       addLog(`🔗 Revision IRI: ${generateRevisionIRI(cellIRI)}`);
       addLog(`📦 Original cell remains unchanged, new revision cell created with provenance`);
 
-      // Refresh annotations to show the new revision
-      if (pdfViewerRef.value && pdfViewerRef.value.refreshAnnotations) {
-        addLog(`🔄 Refreshing annotations to show new revision...`);
-        await pdfViewerRef.value.refreshAnnotations();
+      if (pdfViewerRef.value && pdfViewerRef.value.refreshAnnotationsForPage) {
+        await pdfViewerRef.value.refreshAnnotationsForPage();
       }
+      
+      await refreshData();
     }
   } catch (error) {
     console.error('Failed to create cell revision', error);
