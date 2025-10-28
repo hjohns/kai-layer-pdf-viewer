@@ -1,15 +1,16 @@
 <script setup lang="ts">
 import type { OverlayAnnotation } from '@/types/annotations';
 
-const { addLog } = useLog();
-const route = useRoute();
-
-// Get page number from query parameter, default to 8
-const targetPage = computed(() => {
-  const pageParam = route.query.page;
-  const pageNumber = pageParam ? parseInt(pageParam as string, 10) : 8;
-  return isNaN(pageNumber) ? 8 : pageNumber;
+definePageMeta({
+  validate: async (route) => {
+    if (!route.query.page) {
+      return navigateTo({ ...route, query: { ...route.query, page: '8' } });
+    }
+    return true;
+  }
 });
+
+const { addLog } = useLog();
 
 // Handle overlay click events - show IRI and semantic data
 const handleOverlayClick = (overlay: OverlayAnnotation) => {
@@ -49,12 +50,11 @@ const handleCanvasClick = (context: { x: number, y: number, pageNumber: number }
 <template>
   <TestPanel
     heading="PDF 21 JSONLD Table Query Parameter"
-    description="Test JSONLD table cell annotations with page from query parameter (?page=8). Click on table cells to see their semantic properties."
+    description="Test JSONLD table cell annotations with page from query parameter (?page=N). Click on table cells to see their semantic properties."
   >
     <PDFViewer
       file="/pdf-tests/pdf-01.pdf"
       overlays="/pdf-tests/page-8-table-overlay-updated.jsonld"
-      :page="targetPage"
       @overlay-click="handleOverlayClick"
       @canvas-click="handleCanvasClick"
     />

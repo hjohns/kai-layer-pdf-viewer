@@ -4,6 +4,15 @@ import type { OverlayAnnotation } from '@/types/annotations';
 import type { MouseLineIntersectionContext } from '@/composables/useMouseGuide';
 import type { AnnotationRenderContext } from '@/composables/usePdf';
 
+definePageMeta({
+  validate: async (route) => {
+    if (!route.query.page) {
+      return navigateTo({ ...route, query: { ...route.query, page: '8' } });
+    }
+    return true;
+  }
+});
+
 const { addLog } = useLog();
 const { lineMode, mouseLineConfig, toggleLineMode, shouldProcessIntersections } = useMouseLineMode();
 const SPARQL_ENDPOINT = 'https://ecass-fuseki.agreeablemoss-36d29f99.australiaeast.azurecontainerapps.io/confidence/query';
@@ -325,16 +334,6 @@ const handleToggleLineMode = () => {
   addLog(`📐 Line mode changed to: ${lineMode.value}`);
 };
 
-onMounted(() => {
-  nextTick(() => {
-    setTimeout(() => {
-      if (pdfViewerRef.value && pdfViewerRef.value.goToPage) {
-        pdfViewerRef.value.goToPage(7);
-        addLog('Navigated to page 8 where table annotations are located');
-      }
-    }, 2000);
-  });
-});
 </script>
 
 <template>
@@ -380,7 +379,6 @@ onMounted(() => {
     </template>
 
     <PDFViewer
-      ref="pdfViewerRef"
       file="/pdf-tests/pdf-01.pdf"
       :annotation-fetcher="fetchAnnotations"
       @overlay-click="handleOverlayClick"

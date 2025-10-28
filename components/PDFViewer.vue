@@ -93,8 +93,9 @@
   </template>
   
   <script setup lang="ts">
-import { watch, onMounted, onBeforeUnmount, nextTick } from "vue";  
+import { watch, onMounted, onBeforeUnmount, nextTick, computed } from "vue";
 import { usePdf } from '@/composables/usePdf';
+import { useRoute } from '#app';
 
 import type { OverlayAnnotation } from '@/types/annotations';
 import type { AnnotationRenderContext, AnnotationSource } from '@/composables/usePdfAnnotations';
@@ -122,7 +123,9 @@ const props = defineProps<{
   file: string,
   htmlAnnotation?: (context: AnnotationRenderContext, annotation: OverlayAnnotation) => string,
   mouseLine?: MouseLinePropConfig,
-  page?: number
+  page?: number,
+  highlightPredicate?: (annotation: OverlayAnnotation) => boolean,
+  disableConfidenceColors?: boolean
 }>();
 
 // Define events that the component can emit
@@ -131,6 +134,18 @@ const emit = defineEmits<{
     'canvas-click': [event: { x: number, y: number, pageNumber: number }]
     'mouse-line-intersections': [context: MouseLineIntersectionContext]
 }>();
+
+// Read page from query param as fallback
+const route = useRoute();
+const pageFromQuery = computed(() => {
+  const pageParam = route.query.page;
+  if (!pageParam) return undefined;
+  const pageNumber = parseInt(pageParam as string, 10);
+  return isNaN(pageNumber) ? undefined : pageNumber;
+});
+
+// Use explicit page prop if provided, otherwise fall back to query param
+const effectivePage = computed(() => props.page ?? pageFromQuery.value);
 
 const toMouseLineOptions = (config?: MouseLinePropConfig) => ({
   enabled: config?.enabled ?? false,
@@ -186,13 +201,15 @@ const toMouseLineOptions = (config?: MouseLinePropConfig) => ({
     (overlay: OverlayAnnotation, context: { x: number, y: number, pageNumber: number }) => {
       emit('overlay-click', overlay, context);
     },
-    // onCanvasClick handler  
+    // onCanvasClick handler
     (context: { x: number, y: number, pageNumber: number }) => {
       emit('canvas-click', context);
     },
     {
       mouseLine: toMouseLineOptions(props.mouseLine),
-      annotationFetcher: props.annotationFetcher ?? null
+      annotationFetcher: props.annotationFetcher ?? null,
+      highlightPredicate: props.highlightPredicate,
+      disableConfidenceColors: props.disableConfidenceColors
     }
   );
   
@@ -320,9 +337,9 @@ const toMouseLineOptions = (config?: MouseLinePropConfig) => ({
     { deep: true }
   );
 
-  // Watch for page prop changes and navigate to the specified page
+  // Watch for page changes (from prop or query param) and navigate to the specified page
   watch(
-    () => props.page,
+    effectivePage,
     (newPage) => {
       if (newPage !== undefined && pdfDocument.value) {
         // Convert 1-based page number to 0-based index
@@ -337,12 +354,12 @@ const toMouseLineOptions = (config?: MouseLinePropConfig) => ({
   onMounted(() => {
     console.log("Component mounted, canvas ref:", canvasRef.value);
 
-    // Navigate to initial page if specified
-    if (props.page !== undefined) {
+    // Navigate to initial page if specified (from prop or query param)
+    if (effectivePage.value !== undefined) {
       nextTick(() => {
         setTimeout(() => {
           if (pdfDocument.value) {
-            const pageIndex = props.page! - 1;
+            const pageIndex = effectivePage.value! - 1;
             if (pageIndex >= 0 && pageIndex < totalPages.value) {
               goToPage(pageIndex);
             }

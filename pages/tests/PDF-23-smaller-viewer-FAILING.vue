@@ -2,8 +2,16 @@
 import type { OverlayAnnotation } from '@/types/annotations';
 import type { MouseLineIntersectionContext } from '@/composables/useMouseGuide';
 
+definePageMeta({
+  validate: async (route) => {
+    if (!route.query.page) {
+      return navigateTo({ ...route, query: { ...route.query, page: '8' } });
+    }
+    return true;
+  }
+});
+
 const { addLog } = useLog();
-const pdfViewerRef = ref();
 const intersectingOverlays = ref<OverlayAnnotation[]>([]);
 const mouseLineX = ref<number | null>(null);
 const mouseLineY = ref<number | null>(null);
@@ -75,20 +83,6 @@ const handleMouseLineIntersections = (context: MouseLineIntersectionContext) => 
   }
 };
 
-// Navigate to page 8 when component mounts
-onMounted(() => {
-  nextTick(() => {
-    // Wait a bit for PDF to load, then navigate to page 8
-    setTimeout(() => {
-      if (pdfViewerRef.value && pdfViewerRef.value.goToPage) {
-        pdfViewerRef.value.goToPage(7); // 0-based index, so 7 = page 8
-        addLog('Navigated to page 8 where table annotations are located');
-        addLog('Click the toggle button to switch between vertical/horizontal/none modes');
-      }
-    }, 2000);
-  });
-});
-
 </script>
 
 <template>
@@ -109,7 +103,6 @@ onMounted(() => {
 
     <div class="flex-1 flex justify-center overflow-auto p-4">
       <PDFViewer
-        ref="pdfViewerRef"
         file="/pdf-tests/pdf-01.pdf"
         overlays="/pdf-tests/page-8-table-overlay-updated.jsonld"
         @overlay-click="handleOverlayClick"

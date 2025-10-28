@@ -94,6 +94,15 @@ import { usePdfAnnotations } from '@/composables/usePdfAnnotations';
 import type { OverlayAnnotation } from '@/types/annotations';
 import type { AnnotationProvider, AnnotationRenderContext } from '@/composables/usePdfAnnotations';
 
+definePageMeta({
+  validate: async (route) => {
+    if (!route.query.page) {
+      return navigateTo({ ...route, query: { ...route.query, page: '8' } });
+    }
+    return true;
+  }
+});
+
 // PDF file configuration
 const pdfFile = ref('/pdf-tests/pdf-01.pdf');
 const overlays = ref('/pdf-tests/pdf-01-overlay.json');

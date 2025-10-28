@@ -33,6 +33,8 @@ export interface UsePdfMouseLineOptions {
 export interface UsePdfOptions {
   mouseLine?: UsePdfMouseLineOptions;
   annotationFetcher?: AnnotationFetcher | null;
+  highlightPredicate?: (annotation: OverlayAnnotation) => boolean;
+  disableConfidenceColors?: boolean;
 }
 
 export function usePdf(
@@ -217,7 +219,7 @@ export function usePdf(
   } = usePdfAnnotations(annotationCanvasRef, htmlOverlayContainer, htmlAnnotation, onOverlayClick, {
     createOverlayElement,
     addTrackedOverlay
-  });
+  }, options.highlightPredicate, options.disableConfidenceColors);
 
   const dynamicAnnotationFetcher = ref<AnnotationFetcher | null>(
     options.annotationFetcher ?? null

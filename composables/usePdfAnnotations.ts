@@ -98,7 +98,9 @@ export function usePdfAnnotations(
   overlayManagement?: {
     createOverlayElement: () => HTMLElement;
     addTrackedOverlay: (id: string, element: HTMLElement) => void;
-  }
+  },
+  highlightPredicate?: (annotation: OverlayAnnotation) => boolean,
+  disableConfidenceColors?: boolean
 ) {
   // Get composable functions
   const geometryComposable = useAnnotationGeometry();
@@ -580,7 +582,13 @@ export function usePdfAnnotations(
         continue;
       }
       const { path } = pathData;
-      const { fill, stroke } = getConfidenceColors(annotation);
+
+      // Check if this annotation should be highlighted
+      const shouldHighlight = highlightPredicate ? highlightPredicate(annotation) : false;
+      const { fill, stroke } = getConfidenceColors(annotation, {
+        highlight: shouldHighlight,
+        disableConfidenceColors: disableConfidenceColors ?? false
+      });
 
       // Draw the annotation
       ctx.save();

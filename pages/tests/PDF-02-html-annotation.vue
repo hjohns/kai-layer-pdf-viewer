@@ -1,3 +1,14 @@
+<script setup lang="ts">
+definePageMeta({
+  validate: async (route) => {
+    if (!route.query.page) {
+      return navigateTo({ ...route, query: { ...route.query, page: '8' } });
+    }
+    return true;
+  }
+});
+</script>
+
 <template>
   <div>
     <TestPanel 

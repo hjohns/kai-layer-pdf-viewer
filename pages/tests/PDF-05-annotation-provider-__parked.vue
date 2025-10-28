@@ -42,6 +42,15 @@ import { usePdfAnnotations } from '@/composables/usePdfAnnotations';
 import type { OverlayAnnotation } from '@/types/annotations';
 import type { AnnotationProvider, AnnotationRenderContext, HtmlOverlayFunction, HtmlTemplateFunction } from '@/composables/usePdfAnnotations';
 
+definePageMeta({
+  validate: async (route) => {
+    if (!route.query.page) {
+      return navigateTo({ ...route, query: { ...route.query, page: '8' } });
+    }
+    return true;
+  }
+});
+
 const { addLog } = useLog();
 
 // PDF file configuration

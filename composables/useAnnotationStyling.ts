@@ -22,10 +22,28 @@ export const useAnnotationStyling = () => {
 
   const getConfidenceColors = (
     annotation: OverlayAnnotation,
-    options: { highlight?: boolean } = {}
+    options: { highlight?: boolean; disableConfidenceColors?: boolean } = {}
   ) => {
     const confidence = parseConfidenceValue(annotation);
     const highlight = options.highlight ?? false;
+    const disableConfidenceColors = options.disableConfidenceColors ?? false;
+
+    // When confidence colors are disabled, use neutral gray colors
+    if (disableConfidenceColors) {
+      if (highlight) {
+        // Highlighted: fluorescent yellow
+        return {
+          fill: 'rgba(255, 255, 0, 0.5)',
+          stroke: 'rgba(255, 255, 0, 1.0)'
+        };
+      } else {
+        // Normal: subtle gray
+        return {
+          fill: 'rgba(200, 200, 200, 0.15)',
+          stroke: 'rgba(148, 163, 184, 0.45)'
+        };
+      }
+    }
 
     if (confidence === null) {
       const strokeAlpha = highlight ? 0.7 : 0.45;
