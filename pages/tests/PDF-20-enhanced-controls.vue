@@ -5,12 +5,13 @@ import type { MouseLineIntersectionContext } from '@/composables/useMouseGuide';
 import type { AnnotationRenderContext } from '@/composables/usePdf';
 
 definePageMeta({
-  validate: async (route) => {
-    if (!route.query.page) {
-      return navigateTo({ ...route, query: { ...route.query, page: '8' } });
+  middleware: [
+    (route) => {
+      if (!route.query.page) {
+        return navigateTo({ ...route, query: { ...route.query, page: '8' } });
+      }
     }
-    return true;
-  }
+  ]
 });
 
 const { addLog } = useLog();

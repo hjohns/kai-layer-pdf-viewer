@@ -4,12 +4,13 @@ import type { OverlayAnnotation } from '@/types/annotations';
 import type { MouseLineIntersectionContext } from '@/composables/useMouseGuide';
 
 definePageMeta({
-  validate: async (route) => {
-    if (!route.query.page) {
-      return navigateTo({ ...route, query: { ...route.query, page: '8' } });
+  middleware: [
+    (route) => {
+      if (!route.query.page) {
+        return navigateTo({ ...route, query: { ...route.query, page: '8' } });
+      }
     }
-    return true;
-  }
+  ]
 });
 
 const SPARQL_ENDPOINT = 'https://ecass-fuseki.agreeablemoss-36d29f99.australiaeast.azurecontainerapps.io/confidence/query';
