@@ -93,7 +93,7 @@
   </template>
   
   <script setup lang="ts">
-import { watch, onMounted, onBeforeUnmount, nextTick, computed } from "vue";
+import { watch, onMounted, onBeforeUnmount, nextTick, computed, toRef } from "vue";
 import { usePdf } from '@/composables/usePdf';
 import { useRoute } from '#app';
 
@@ -158,7 +158,7 @@ const toMouseLineOptions = (config?: MouseLinePropConfig) => ({
   }
 });
 
-  const { 
+  const {
     // State
     pdfDocument,
     currentPage,
@@ -171,8 +171,9 @@ const toMouseLineOptions = (config?: MouseLinePropConfig) => ({
     annotationCanvasRef,
     overlayCanvasRef,
     htmlOverlayContainer,
-    
-    
+    currentEffectiveDpi,
+
+
     // Methods
     loadPdf,
     initializePdfCoordinates,
@@ -190,7 +191,8 @@ const toMouseLineOptions = (config?: MouseLinePropConfig) => ({
     setMouseLineOptions,
     setAnnotationFetcher,
     refreshAnnotationsForPage,
-    
+    drawAnnotations,
+
     // Computed
     canGoNext,
     canGoPrev,
@@ -208,8 +210,9 @@ const toMouseLineOptions = (config?: MouseLinePropConfig) => ({
     {
       mouseLine: toMouseLineOptions(props.mouseLine),
       annotationFetcher: props.annotationFetcher ?? null,
-      highlightPredicate: props.highlightPredicate,
-      disableConfidenceColors: props.disableConfidenceColors
+      // Pass as refs so changes are reactive
+      highlightPredicate: toRef(() => props.highlightPredicate),
+      disableConfidenceColors: toRef(() => props.disableConfidenceColors)
     }
   );
   
@@ -321,7 +324,39 @@ const toMouseLineOptions = (config?: MouseLinePropConfig) => ({
     },
     { deep: true }
   );
-  
+
+  // Watch for highlight predicate changes and redraw annotations only (not the whole page)
+  watch(
+    () => props.highlightPredicate,
+    () => {
+      if (pdfDocument.value && annotationCanvasRef.value) {
+        const ctx = annotationCanvasRef.value.getContext('2d');
+        if (ctx) {
+          // Clear and redraw annotations only
+          ctx.clearRect(0, 0, annotationCanvasRef.value.width, annotationCanvasRef.value.height);
+          // Use the stored effectiveDpi instead of recalculating
+          drawAnnotations(ctx, currentPage.value, currentEffectiveDpi.value);
+        }
+      }
+    }
+  );
+
+  // Watch for confidence colors changes and redraw annotations only (not the whole page)
+  watch(
+    () => props.disableConfidenceColors,
+    () => {
+      if (pdfDocument.value && annotationCanvasRef.value) {
+        const ctx = annotationCanvasRef.value.getContext('2d');
+        if (ctx) {
+          // Clear and redraw annotations only
+          ctx.clearRect(0, 0, annotationCanvasRef.value.width, annotationCanvasRef.value.height);
+          // Use the stored effectiveDpi instead of recalculating
+          drawAnnotations(ctx, currentPage.value, currentEffectiveDpi.value);
+        }
+      }
+    }
+  );
+
   watch(canvasRef, (newCanvas) => {
     if (newCanvas && pdfDocument.value && currentPage.value === 0) {
       console.log("Canvas now available, displaying first page");

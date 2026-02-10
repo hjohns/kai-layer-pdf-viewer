@@ -1,4 +1,4 @@
-import { ref, computed, toRaw } from 'vue';
+import { ref, computed, toRaw, watch, unref, type Ref } from 'vue';
 import { DateTime } from 'luxon';
 import { useMuPdf } from './useMuPdf';
 import { usePdfAnnotations } from './usePdfAnnotations';
@@ -33,8 +33,8 @@ export interface UsePdfMouseLineOptions {
 export interface UsePdfOptions {
   mouseLine?: UsePdfMouseLineOptions;
   annotationFetcher?: AnnotationFetcher | null;
-  highlightPredicate?: (annotation: OverlayAnnotation) => boolean;
-  disableConfidenceColors?: boolean;
+  highlightPredicate?: Ref<((annotation: OverlayAnnotation) => boolean) | undefined> | ((annotation: OverlayAnnotation) => boolean);
+  disableConfidenceColors?: Ref<boolean | undefined> | boolean;
 }
 
 export function usePdf(
@@ -129,6 +129,9 @@ export function usePdf(
   const overlayCanvasRef = ref<HTMLCanvasElement | null>(null);
   const htmlOverlayContainer = ref<HTMLElement | null>(null);
 
+  // Store the current effectiveDpi for annotation redraws
+  const currentEffectiveDpi = ref(192); // Default DPI
+
   // Optimized HTML overlay lifecycle management (defined before usePdfAnnotations)
   const activeOverlays = new Map<string, HTMLElement>();
   const overlayPool: HTMLElement[] = [];
@@ -219,7 +222,10 @@ export function usePdf(
   } = usePdfAnnotations(annotationCanvasRef, htmlOverlayContainer, htmlAnnotation, onOverlayClick, {
     createOverlayElement,
     addTrackedOverlay
-  }, options.highlightPredicate, options.disableConfidenceColors);
+  },
+  // Pass as refs or plain values - usePdfAnnotations will handle both
+  options.highlightPredicate,
+  options.disableConfidenceColors);
 
   const dynamicAnnotationFetcher = ref<AnnotationFetcher | null>(
     options.annotationFetcher ?? null
@@ -519,6 +525,9 @@ export function usePdf(
             const SCALE_FACTOR = 1;
             const effectiveDpi = baseScale * PDF_POINTS_PER_INCH * SCALE_FACTOR;
 
+            // Store the effectiveDpi for annotation redraws
+            currentEffectiveDpi.value = effectiveDpi;
+
             console.log('[PDF Display] About to draw annotations - pageNumber:', pageNumber, 'effectiveDpi:', effectiveDpi);
             console.log('[PDF Display] Annotation canvas dimensions:', annotationCanvasRef.value.width, 'x', annotationCanvasRef.value.height);
             drawAnnotations(annotationCtx, pageNumber, effectiveDpi);
@@ -703,6 +712,7 @@ export function usePdf(
     annotationCanvasRef,
     overlayCanvasRef,
     htmlOverlayContainer,
+    currentEffectiveDpi,
 
     // Annotation state (re-exported from usePdfAnnotations)
     pageAnnotations,
@@ -735,7 +745,8 @@ export function usePdf(
     // Annotation methods (re-exported from usePdfAnnotations)
     closeDialog,
     cleanupProviders,
-    
+    drawAnnotations,
+
     // HTML overlay management
     clearHtmlOverlays,
     createOverlayElement,

@@ -1,6 +1,16 @@
 <script setup lang="ts">
 import { ref, onMounted, watch } from 'vue';
 
+definePageMeta({
+  middleware: [
+    (route) => {
+      if (!route.query.page) {
+        return navigateTo({ ...route, query: { ...route.query, page: '8' } });
+      }
+    }
+  ]
+});
+
 interface Point {
   x: number;
   y: number;
@@ -192,12 +202,11 @@ function updateVisualization() {
   canvas.width = pageWidth * scale.value;
   canvas.height = pageHeight * scale.value;
 
-  // Draw page background
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  // Clear canvas (transparent background to see PDF underneath)
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  // Draw grid lines (every inch)
-  ctx.strokeStyle = '#e0e0e0';
+  // Draw grid lines (every inch) - semi-transparent for visibility over PDF
+  ctx.strokeStyle = 'rgba(224, 224, 224, 0.5)';
   ctx.lineWidth = 1;
 
   // Vertical lines
@@ -216,9 +225,22 @@ function updateVisualization() {
     ctx.stroke();
   }
 
-  // Draw inch markers
-  ctx.fillStyle = '#666';
+  // Draw inch markers with background for visibility over PDF
   ctx.font = '10px Arial';
+
+  // Draw backgrounds for markers first
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+  for (let i = 1; i <= pageWidth; i++) {
+    const text = i + '"';
+    const metrics = ctx.measureText(text);
+    ctx.fillRect(i * scale.value - metrics.width / 2 - 2, 2, metrics.width + 4, 12);
+  }
+  for (let i = 1; i <= pageHeight; i++) {
+    ctx.fillRect(3, i * scale.value - 6, 20, 12);
+  }
+
+  // Draw text on top of backgrounds
+  ctx.fillStyle = '#666';
   for (let i = 1; i <= pageWidth; i++) {
     ctx.fillText(i + '"', i * scale.value - 8, 12);
   }
@@ -280,10 +302,22 @@ function updateVisualization() {
       const centerX = (polygonCoords[0].x + polygonCoords[1].x) / 2 * scale.value;
       const centerY = (polygonCoords[0].y + polygonCoords[2].y) / 2 * scale.value;
 
-      ctx.fillStyle = '#000000';
       ctx.font = 'bold 12px Arial';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
+
+      // Draw background for text visibility
+      const textMetrics = ctx.measureText(polygon.text);
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+      ctx.fillRect(
+        centerX - textMetrics.width / 2 - 2,
+        centerY - 8,
+        textMetrics.width + 4,
+        16
+      );
+
+      // Draw text
+      ctx.fillStyle = '#000000';
       ctx.fillText(polygon.text, centerX, centerY);
     }
   });

@@ -2,7 +2,145 @@
 
 This guide explains how to highlight annotations in the PDF viewer, including using query parameters and custom annotation fetchers.
 
-## Basic Highlighting with `highlightPredicate`
+## Quick Start (Recommended) ⭐
+
+The easiest way to highlight cells by IRI is using the `useHighlightCell` composable:
+
+```vue
+<script setup lang="ts">
+// Automatically syncs with ?highlightIri query parameter
+const { shouldHighlight, disableConfidenceColors, getCellInfo } = useHighlightCell({
+  defaultIri: 'https://example.com/cell/123'  // Optional default
+})
+
+const handleClick = (overlay) => {
+  const info = getCellInfo(overlay)
+  console.log(info.iri, info.rowIndex, info.columnIndex, info.confidence)
+}
+</script>
+
+<template>
+  <PDFViewer
+    file="/path/to/pdf.pdf"
+    overlays="/path/to/annotations.jsonld"
+    :highlight-predicate="shouldHighlight"
+    :disable-confidence-colors="disableConfidenceColors"
+    @overlay-click="handleClick"
+  />
+</template>
+```
+
+### Toggle Between Line and Cell Highlighting
+
+Use the `isHighlightMode` flag to toggle between mouse line intersections and cell highlighting:
+
+```vue
+<script setup lang="ts">
+const {
+  shouldHighlight,
+  disableConfidenceColors,
+  isHighlightMode,  // true when highlightIri is set
+  setHighlightIri,
+  clearHighlight
+} = useHighlightCell()
+
+// Disable mouse line when highlighting a cell
+const mouseLineConfig = computed(() => ({
+  enabled: !isHighlightMode.value,
+  tooltips: true
+}))
+</script>
+
+<template>
+  <PDFViewer
+    file="/path/to/pdf.pdf"
+    overlays="/path/to/annotations.jsonld"
+    :highlight-predicate="shouldHighlight"
+    :disable-confidence-colors="disableConfidenceColors"
+    :mouse-line="mouseLineConfig"
+  />
+</template>
+```
+
+### Manual Confidence Colors Control
+
+By default, confidence colors are automatically disabled when highlighting a cell (`confidenceColorsMode: 'auto'`). For independent control, use manual mode:
+
+```vue
+<script setup lang="ts">
+const {
+  shouldHighlight,
+  disableConfidenceColors,
+  isHighlightMode,
+  toggleConfidenceColors,
+  setHighlightIri
+} = useHighlightCell({
+  confidenceColorsMode: 'manual'  // Manual control
+})
+</script>
+
+<template>
+  <Button @click="toggleConfidenceColors">
+    {{ disableConfidenceColors ? 'Show Confidence Colors' : 'Hide Confidence Colors' }}
+  </Button>
+
+  <PDFViewer
+    file="/path/to/pdf.pdf"
+    overlays="/path/to/annotations.jsonld"
+    :highlight-predicate="shouldHighlight"
+    :disable-confidence-colors="disableConfidenceColors"
+  />
+</template>
+```
+
+**Complete examples:**
+- Basic IRI highlighting: `pages/tests/PDF-24-highlight-iri.vue`
+- Toggle line vs cell modes: `pages/tests/PDF-25-toggle-line-vs-cell.vue`
+
+### API Reference: `useHighlightCell`
+
+```typescript
+const {
+  // State
+  highlightIri,            // Ref<string | undefined> - Current IRI being highlighted
+
+  // Computed
+  shouldHighlight,         // (annotation) => boolean - Predicate for PDFViewer
+  disableConfidenceColors, // boolean - Auto-true when highlighting
+  isHighlightMode,         // boolean - True when highlightIri is set
+
+  // Methods
+  getCellInfo,                     // (annotation) => CellInfo - Extract semantic properties
+  setHighlightIri,                 // (iri?: string) => void - Update the highlighted IRI
+  clearHighlight,                  // () => void - Clear the highlight
+  toggleConfidenceColors,          // () => void - Toggle confidence colors (manual mode only)
+  setConfidenceColorsDisabled      // (disabled: boolean) => void - Set confidence colors state (manual mode only)
+} = useHighlightCell({
+  defaultIri?: string,           // Optional default IRI to highlight
+  syncWithRoute?: boolean,       // Auto-sync with route.query.highlightIri (default: true)
+  queryParam?: string,           // Custom query parameter name (default: 'highlightIri')
+  confidenceColorsMode?: 'auto' | 'manual' | boolean
+    // 'auto': Auto-disable confidence colors when highlighting (default)
+    // 'manual': Manual control via toggleConfidenceColors()
+    // boolean: Fixed value (true = disabled, false = enabled)
+})
+```
+
+**CellInfo type:**
+```typescript
+interface CellInfo {
+  iri: string              // The annotation's IRI
+  content: string          // The cell's content/text
+  rowIndex?: number        // Row index (if available)
+  columnIndex?: number     // Column index (if available)
+  confidence?: number      // Confidence value (if available)
+  kind?: string            // Kind/type of cell (if available)
+  semanticProperties?: Record<string, any>  // Full semantic properties
+  annotation: OverlayAnnotation  // Raw annotation object
+}
+```
+
+## Manual Highlighting with `highlightPredicate` (Advanced)
 
 The PDF viewer supports highlighting specific annotations using the `highlightPredicate` prop. This prop accepts a function that determines whether an annotation should be highlighted.
 
@@ -131,7 +269,32 @@ export default defineNuxtConfig({
 })
 ```
 
-2. **Create a custom page in your app:**
+2. **Simple approach using the composable (Recommended):**
+
+```vue
+<!-- pages/pdf-viewer.vue in YOUR app -->
+<script setup lang="ts">
+// The composable is auto-imported from the layer
+const { shouldHighlight, disableConfidenceColors, getCellInfo } = useHighlightCell()
+
+const handleClick = (overlay) => {
+  const info = getCellInfo(overlay)
+  console.log('Clicked:', info.iri, info.rowIndex, info.columnIndex)
+}
+</script>
+
+<template>
+  <PDFViewer
+    :file="route.query.pdf as string"
+    overlays="/path/to/annotations.jsonld"
+    :highlight-predicate="shouldHighlight"
+    :disable-confidence-colors="disableConfidenceColors"
+    @overlay-click="handleClick"
+  />
+</template>
+```
+
+3. **Advanced approach with custom SPARQL queries:**
 
 ```vue
 <!-- pages/pdf-viewer.vue in YOUR app -->

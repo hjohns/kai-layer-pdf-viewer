@@ -1,4 +1,4 @@
-import { ref, computed, type Ref } from 'vue';
+import { ref, computed, type Ref, unref } from 'vue';
 import html2canvas from 'html2canvas';
 import type { OverlayAnnotation } from '@/types/annotations';
 import { usePdfCoordinates } from './usePdfCoordinates';
@@ -99,8 +99,8 @@ export function usePdfAnnotations(
     createOverlayElement: () => HTMLElement;
     addTrackedOverlay: (id: string, element: HTMLElement) => void;
   },
-  highlightPredicate?: (annotation: OverlayAnnotation) => boolean,
-  disableConfidenceColors?: boolean
+  highlightPredicate?: Ref<((annotation: OverlayAnnotation) => boolean) | undefined> | ((annotation: OverlayAnnotation) => boolean),
+  disableConfidenceColors?: Ref<boolean | undefined> | boolean
 ) {
   // Get composable functions
   const geometryComposable = useAnnotationGeometry();
@@ -487,20 +487,11 @@ export function usePdfAnnotations(
 
   // Get annotations for a specific page
   const getAnnotationsForPage = (pageNumber: number) => {
-    console.log('[Get Annotations] Requested page:', pageNumber, 'Total annotations:', pageAnnotations.value.length);
-    console.log('[Get Annotations] Looking for page:', (pageNumber + 1).toString());
-
     const filtered = pageAnnotations.value.filter(
       (annotation: OverlayAnnotation) => {
-        console.log('[Get Annotations] Checking annotation page:', annotation.page, 'vs target:', (pageNumber + 1).toString());
         return annotation.page === (pageNumber + 1).toString();
       }
     );
-
-    console.log('[Get Annotations] Found', filtered.length, 'annotations for page', pageNumber);
-    if (filtered.length > 0) {
-      console.log('[Get Annotations] First annotation:', filtered[0]);
-    }
 
     return filtered;
   };
@@ -584,10 +575,12 @@ export function usePdfAnnotations(
       const { path } = pathData;
 
       // Check if this annotation should be highlighted
-      const shouldHighlight = highlightPredicate ? highlightPredicate(annotation) : false;
+      // Use unref to handle both Refs and plain values
+      const currentHighlightPredicate = unref(highlightPredicate);
+      const shouldHighlight = currentHighlightPredicate ? currentHighlightPredicate(annotation) : false;
       const { fill, stroke } = getConfidenceColors(annotation, {
         highlight: shouldHighlight,
-        disableConfidenceColors: disableConfidenceColors ?? false
+        disableConfidenceColors: unref(disableConfidenceColors) ?? false
       });
 
       // Draw the annotation
@@ -610,25 +603,7 @@ export function usePdfAnnotations(
       buildAnnotationSpatialIndex(canvasRef.value);
     }
 
-    if (useVirtualRendering) {
-      console.log(`[Virtual Rendering] Rendered ${renderedCount}/${currentPageAnnotations.length} annotations (culled ${culledCount})`);
-    } else {
-      console.log(`[Standard Rendering] Rendered ${renderedCount} annotations`);
-    }
-
-    console.log('[Annotation Rendering] Total annotations for page:', currentPageAnnotations.length);
-    console.log('[Annotation Rendering] AnnotationPaths size:', annotationPaths.value.size);
-    console.log('[Annotation Rendering] Spatial index:', spatialIndex.value ? 'built' : 'null');
-    console.log('[Annotation Rendering] Total pageAnnotations in memory:', pageAnnotations.value.length);
-
-    // Debug the first few annotations
-    currentPageAnnotations.slice(0, 3).forEach((ann, i) => {
-      console.log(`[Annotation ${i}] Content:`, ann.content, 'Rect:', ann.rect, 'Page:', ann.page);
-    });
-
-    // Also debug the raw pageAnnotations to see what pages we have
-    const availablePages = new Set(pageAnnotations.value.map(ann => ann.page));
-    console.log('[Annotation Rendering] Available pages in annotations:', Array.from(availablePages));
+    // Rendering complete
   };
 
   // Check if point is inside any annotation
