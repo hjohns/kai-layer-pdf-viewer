@@ -37,6 +37,31 @@ export interface UsePdfOptions {
   disableConfidenceColors?: Ref<boolean | undefined> | boolean;
 }
 
+const pdfByteCache = new Map<string, Promise<ArrayBuffer>>();
+
+const fetchPdfBytes = (file: string): Promise<ArrayBuffer> => {
+  const cached = pdfByteCache.get(file);
+  if (cached) {
+    return cached;
+  }
+
+  const request = fetch(file)
+    .then(async (response) => {
+      if (!response.ok) {
+        throw new Error(`Failed to fetch PDF (${response.status})`);
+      }
+      return response.arrayBuffer();
+    })
+    .catch((error) => {
+      // Drop failed requests so callers can retry on subsequent attempts.
+      pdfByteCache.delete(file);
+      throw error;
+    });
+
+  pdfByteCache.set(file, request);
+  return request;
+};
+
 export function usePdf(
   htmlAnnotation?: (context: AnnotationRenderContext, annotation: OverlayAnnotation) => string,
   onOverlayClick?: (overlay: OverlayAnnotation, context: { x: number, y: number, pageNumber: number }) => void,
@@ -430,9 +455,7 @@ export function usePdf(
     error.value = null;
 
     try {
-      const response = await fetch(file);
-      console.log('PDF fetch response:', response.status);
-      const arrayBuffer = await response.arrayBuffer();
+      const arrayBuffer = await fetchPdfBytes(file);
       console.log('PDF arrayBuffer size:', arrayBuffer.byteLength);
       
       const workerAnnotations = cloneAnnotationsForWorker(pageAnnotations.value);
