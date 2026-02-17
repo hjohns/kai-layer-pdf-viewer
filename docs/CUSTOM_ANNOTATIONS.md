@@ -9,7 +9,38 @@ The custom annotation system consists of:
 - **Annotation Providers**: Custom functions that define how to render specific types of annotations
 - **Provider Management**: Functions to register, unregister, and manage providers
 - **Fallback System**: Automatic fallback to the default provider if custom providers fail
-- **Priority System**: Providers can have priorities to determine which one handles an annotation
+- **Priority System**: Proadviders can have priorities to determine which one handles an annotation
+
+## Providing Annotation Data
+
+The `<PDFViewer>` component accepts annotation data in two ways:
+
+- `overlays="/path/to/annotations.json"` to load annotations from a URL (existing behaviour)
+- `:overlays-data="annotationsObject"` to pass a JSON/JSON-LD object directly from your application logic
+- `:annotation-fetcher="async page => ..."` to lazily retrieve annotations for a given PDF page (1-based)
+
+When both props are provided, the inline `overlays-data` takes precedence. This enables scenarios where your app fetches annotations (for example via SPARQL) and hands the parsed data straight to the viewer without needing to host an intermediate JSON resource.
+
+### Dynamic annotation loading
+
+You can provide an async function that returns any supported annotation payload (`OverlayAnnotation[]`, `{ overlay: [...] }`, JSON-LD, or a URL to fetch). The viewer calls it every time a new page is displayed. Example:
+
+```vue
+<PDFViewer
+  file="/pdf-tests/pdf-01.pdf"
+  :annotation-fetcher="async page => {
+    const response = await $fetch(`/api/pdf/${page}/annotations`);
+    return response; // can be a JSON object, array, or URL string
+  }"
+/>
+```
+
+The fetcher receives the 1-based page number. Returning `null`, `undefined`, or `{ overlay: [] }` clears annotations for that page while preserving previously loaded results for other pages.
+
+The test harness includes multiple examples:
+
+- `pages/tests/PDF-14-api-annotations.vue` backed by the mock endpoint in `server/api/pdf/[page]/annotations.get.ts` for local REST-style testing.
+- `pages/tests/PDF-15-sparql-jsonld.vue` which queries the live Fuseki instance at `https://ecass-fuseki.agreeablemoss-36d29f99.australiaeast.azurecontainerapps.io/test/query` with an `Accept: application/ld+json` header to retrieve JSON-LD directly from SPARQL.
 
 ## Basic Usage
 

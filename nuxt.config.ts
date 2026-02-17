@@ -15,6 +15,9 @@ export default defineNuxtConfig({
         optimizeDeps: {
             include: ["@triply/yasgui"],
             exclude: ['mupdf']
+        },
+        worker: {
+            format: 'es'
         }
     }
 });

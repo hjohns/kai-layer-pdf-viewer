@@ -4,6 +4,16 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { Button } from '@/components/ui/button';
 import type { OverlayAnnotation } from '@/types/annotations';
 
+definePageMeta({
+  middleware: [
+    (route) => {
+      if (!route.query.page) {
+        return navigateTo({ ...route, query: { ...route.query, page: '8' } });
+      }
+    }
+  ]
+});
+
 const { addLog } = useLog();
 
 // State for custom dialog

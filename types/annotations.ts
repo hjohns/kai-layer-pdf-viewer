@@ -25,6 +25,16 @@ export interface OverlayAnnotation extends BaseAnnotation {
   type?: string;
   /** Optional metadata for custom providers */
   metadata?: Record<string, any>;
+
+  // JSON-LD support properties
+  /** JSON-LD identifier/IRI for semantic annotations */
+  '@id'?: string;
+  /** JSON-LD type(s) for semantic annotations */
+  '@type'?: string | string[];
+  /** JSON-LD context for semantic annotations */
+  '@context'?: string | Record<string, any>;
+  /** Semantic properties extracted from JSON-LD */
+  semanticProperties?: Record<string, any>;
 }
 
 /**

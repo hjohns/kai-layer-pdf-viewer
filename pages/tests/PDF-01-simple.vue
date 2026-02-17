@@ -1,3 +1,15 @@
+<script setup lang="ts">
+definePageMeta({
+  middleware: [
+    (route) => {
+      if (!route.query.page) {
+        return navigateTo({ ...route, query: { ...route.query, page: '8' } });
+      }
+    }
+  ]
+});
+</script>
+
 <template>
     <TestPanel heading="PDF 01 Simple" description="Test PDF 01 simple">
         <PDFViewer 

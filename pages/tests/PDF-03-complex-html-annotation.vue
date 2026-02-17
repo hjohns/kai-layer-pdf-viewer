@@ -18,6 +18,15 @@
 import type { OverlayAnnotation } from '@/types/annotations';
 import type { AnnotationRenderContext } from '@/composables/usePdfAnnotations';
 
+definePageMeta({
+  validate: async (route) => {
+    if (!route.query.page) {
+      return navigateTo({ ...route, query: { ...route.query, page: '8' } });
+    }
+    return true;
+  }
+});
+
 const createExpandableAnnotation = (context: AnnotationRenderContext, annotation: OverlayAnnotation) => {
   // Generate a unique ID for this annotation's dropdown
   const uniqueId = `annotation-${annotation.page}-${annotation.line}-${Date.now()}`;

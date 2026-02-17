@@ -4,18 +4,14 @@ import * as Comlink from 'comlink';
 import { ref, shallowRef } from 'vue';
 import * as mupdfjs from 'mupdf';
 import type { PDFPage } from 'mupdf';
+import MupdfWorkerUrl from '@/workers/mupdf.worker?worker&url';
 
 
 const baseURL = window?.location?.origin || 'http://localhost:3000'
 console.log('Worker base URL:', baseURL)
 
-const workerPath = new URL('../workers/mupdf.worker.ts', import.meta.url).href
-
-const worker = new Worker(
-  workerPath,
-  { type: 'module' }
-);
-console.log('Worker created with URL:', workerPath);
+const worker = new Worker(MupdfWorkerUrl, { type: 'module' });
+console.log('Worker created with URL:', MupdfWorkerUrl);
 
 const mupdfWorker = Comlink.wrap<MupdfWorker>(worker);
 const workerInitialized = ref(false);

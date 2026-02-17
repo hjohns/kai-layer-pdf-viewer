@@ -54,13 +54,18 @@
           </div>
           <div class="mt-4 pdf-container" ref="containerRef">
             <div class="relative">
-              <canvas 
-                ref="canvasRef" 
-                class="border" 
+              <canvas
+                ref="canvasRef"
+                class="border"
                 style="min-width: 100px; min-height: 100px;"
                 @click="handleCanvasClick"
                 @mousemove="handleCanvasMouseMove"
                 @mouseleave="handleCanvasMouseLeave"
+              ></canvas>
+              <canvas
+                ref="annotationCanvasRef"
+                class="absolute top-0 left-0 pointer-events-none"
+                style="min-width: 100px; min-height: 100px;"
               ></canvas>
               <canvas
                 ref="overlayCanvasRef"
@@ -88,25 +93,72 @@
   </template>
   
   <script setup lang="ts">
-  import { watch, onMounted, onBeforeUnmount } from "vue";  
-  import { usePdf } from '@/composables/usePdf';
-  
-  import type { OverlayAnnotation } from '@/types/annotations';
-  import type { AnnotationRenderContext } from '@/composables/usePdfAnnotations';
+import { watch, onMounted, onBeforeUnmount, nextTick, computed, toRef } from "vue";
+import { usePdf } from '@/composables/usePdf';
+import { useRoute } from '#app';
 
-  const props = defineProps<{ 
-    overlays: string | null, 
-    file: string,
-    htmlAnnotation?: (context: AnnotationRenderContext, annotation: OverlayAnnotation) => string
-  }>();
+import type { OverlayAnnotation } from '@/types/annotations';
+import type { AnnotationRenderContext, AnnotationSource } from '@/composables/usePdfAnnotations';
+import type { AnnotationFetcher } from '@/composables/usePdf';
+import type {
+  MouseLineTooltipOptions,
+  MouseLineIntersectionContext,
+  MouseLineOrientation
+} from '@/composables/useMouseGuide';
 
-  // Define events that the component can emit
-  const emit = defineEmits<{
-    'overlay-click': [overlay: OverlayAnnotation, context: { x: number, y: number, pageNumber: number }]
+type MouseLineTooltipProp = boolean | ({ enabled?: boolean } & Partial<Omit<MouseLineTooltipOptions, 'enabled'>>);
+
+interface MouseLinePropConfig {
+  enabled?: boolean;
+  color?: string;
+  width?: number;
+  orientation?: MouseLineOrientation;
+  tooltips?: MouseLineTooltipProp;
+}
+
+const props = defineProps<{
+  overlays?: string | null,
+  overlaysData?: unknown,
+  annotationFetcher?: AnnotationFetcher | null,
+  file: string,
+  htmlAnnotation?: (context: AnnotationRenderContext, annotation: OverlayAnnotation) => string,
+  mouseLine?: MouseLinePropConfig,
+  page?: number,
+  highlightPredicate?: (annotation: OverlayAnnotation) => boolean,
+  disableConfidenceColors?: boolean
+}>();
+
+// Define events that the component can emit
+const emit = defineEmits<{
+  'overlay-click': [overlay: OverlayAnnotation, context: { x: number, y: number, pageNumber: number }]
     'canvas-click': [event: { x: number, y: number, pageNumber: number }]
-  }>();
-  
-  const { 
+    'mouse-line-intersections': [context: MouseLineIntersectionContext]
+}>();
+
+// Read page from query param as fallback
+const route = useRoute();
+const pageFromQuery = computed(() => {
+  const pageParam = route.query.page;
+  if (!pageParam) return undefined;
+  const pageNumber = parseInt(pageParam as string, 10);
+  return isNaN(pageNumber) ? undefined : pageNumber;
+});
+
+// Use explicit page prop if provided, otherwise fall back to query param
+const effectivePage = computed(() => props.page ?? pageFromQuery.value);
+
+const toMouseLineOptions = (config?: MouseLinePropConfig) => ({
+  enabled: config?.enabled ?? false,
+  color: config?.color ?? 'rgba(59, 130, 246, 0.65)',
+  width: config?.width ?? 1.5,
+  orientation: config?.orientation ?? 'vertical',
+  tooltips: config?.tooltips,
+  onIntersections: (context: MouseLineIntersectionContext) => {
+    emit('mouse-line-intersections', context);
+  }
+});
+
+  const {
     // State
     pdfDocument,
     currentPage,
@@ -116,10 +168,12 @@
     metadata,
     workerInitialized,
     canvasRef,
+    annotationCanvasRef,
     overlayCanvasRef,
     htmlOverlayContainer,
-    
-    
+    currentEffectiveDpi,
+
+
     // Methods
     loadPdf,
     initializePdfCoordinates,
@@ -134,7 +188,11 @@
     handleCanvasMouseLeave,
     cleanup,
     cleanupProviders,
-    
+    setMouseLineOptions,
+    setAnnotationFetcher,
+    refreshAnnotationsForPage,
+    drawAnnotations,
+
     // Computed
     canGoNext,
     canGoPrev,
@@ -145,38 +203,205 @@
     (overlay: OverlayAnnotation, context: { x: number, y: number, pageNumber: number }) => {
       emit('overlay-click', overlay, context);
     },
-    // onCanvasClick handler  
+    // onCanvasClick handler
     (context: { x: number, y: number, pageNumber: number }) => {
       emit('canvas-click', context);
+    },
+    {
+      mouseLine: toMouseLineOptions(props.mouseLine),
+      annotationFetcher: props.annotationFetcher ?? null,
+      // Pass as refs so changes are reactive
+      highlightPredicate: toRef(() => props.highlightPredicate),
+      disableConfidenceColors: toRef(() => props.disableConfidenceColors)
     }
   );
   
-  
+  let lastLoadedFile: string | null = null;
+  let lastAnnotationUrl: string | null = null;
+  let lastInlineAnnotationRef: unknown = null;
+
+  const loadCurrentPdf = async () => {
+    if (!props.file || !workerInitialized.value) {
+      return;
+    }
+
+    const hasInlineData = props.overlaysData !== undefined && props.overlaysData !== null;
+    const annotationSource: AnnotationSource | null = hasInlineData
+      ? { data: props.overlaysData }
+      : (props.overlays ?? null);
+
+    if (props.overlays && hasInlineData) {
+      console.warn('PDFViewer: Both overlays URL and inline data provided, using inline data');
+    }
+
+    const hasAnnotationFetcher = typeof props.annotationFetcher === 'function';
+
+    if (!annotationSource && !hasAnnotationFetcher) {
+      console.warn('PDFViewer: No overlays source provided, skipping load');
+      return;
+    }
+
+    const isSameUrlSource =
+      typeof annotationSource === 'string' &&
+      lastLoadedFile === props.file &&
+      lastAnnotationUrl === annotationSource;
+
+    const isSameInlineSource =
+      typeof annotationSource !== 'string' &&
+      lastLoadedFile === props.file &&
+      lastInlineAnnotationRef === props.overlaysData;
+
+    const isSameFetcherOnly =
+      !annotationSource &&
+      hasAnnotationFetcher &&
+      lastLoadedFile === props.file &&
+      lastAnnotationUrl === null &&
+      lastInlineAnnotationRef === null;
+
+    if (isSameUrlSource || isSameInlineSource || isSameFetcherOnly) {
+      return;
+    }
+
+    console.log("Loading PDF:", props.file);
+    await loadPdf(props.file, annotationSource);
+    lastLoadedFile = props.file;
+
+    if (typeof annotationSource === 'string') {
+      lastAnnotationUrl = annotationSource;
+      lastInlineAnnotationRef = null;
+    } else if (annotationSource) {
+      lastAnnotationUrl = null;
+      lastInlineAnnotationRef = props.overlaysData;
+    } else {
+      lastAnnotationUrl = null;
+      lastInlineAnnotationRef = null;
+    }
+  };
+
   watch(
-    () => props.file,
-    async (newFile) => {
-      if (!newFile) return;
-      console.log("File changed, loading new PDF:", newFile);
-      await loadPdf(newFile, props.overlays!);
+    [() => props.file, workerInitialized],
+    async () => {
+      await loadCurrentPdf();
     },
     { immediate: true }
   );
-  
-  watch(workerInitialized, async (isInitialized) => {
-    if (isInitialized && props.file) {
-      await loadPdf(props.file, props.overlays!);
+
+  watch(
+    () => props.annotationFetcher,
+    async (fetcher, previous) => {
+      if (fetcher === previous) {
+        return;
+      }
+
+      setAnnotationFetcher(fetcher);
+      lastLoadedFile = null;
+      lastAnnotationUrl = null;
+      lastInlineAnnotationRef = null;
+
+      if (workerInitialized.value) {
+        await loadCurrentPdf();
+      }
     }
-  });
-  
+  );
+
+  watch(
+    () => props.overlays,
+    async () => {
+      lastLoadedFile = null;
+      lastAnnotationUrl = null;
+      lastInlineAnnotationRef = null;
+      await loadCurrentPdf();
+    }
+  );
+
+  watch(
+    () => props.overlaysData,
+    async () => {
+      lastLoadedFile = null;
+      lastAnnotationUrl = null;
+      lastInlineAnnotationRef = null;
+      await loadCurrentPdf();
+    },
+    { deep: true }
+  );
+
+  // Watch for highlight predicate changes and redraw annotations only (not the whole page)
+  watch(
+    () => props.highlightPredicate,
+    () => {
+      if (pdfDocument.value && annotationCanvasRef.value) {
+        const ctx = annotationCanvasRef.value.getContext('2d');
+        if (ctx) {
+          // Clear and redraw annotations only
+          ctx.clearRect(0, 0, annotationCanvasRef.value.width, annotationCanvasRef.value.height);
+          // Use the stored effectiveDpi instead of recalculating
+          drawAnnotations(ctx, currentPage.value, currentEffectiveDpi.value);
+        }
+      }
+    }
+  );
+
+  // Watch for confidence colors changes and redraw annotations only (not the whole page)
+  watch(
+    () => props.disableConfidenceColors,
+    () => {
+      if (pdfDocument.value && annotationCanvasRef.value) {
+        const ctx = annotationCanvasRef.value.getContext('2d');
+        if (ctx) {
+          // Clear and redraw annotations only
+          ctx.clearRect(0, 0, annotationCanvasRef.value.width, annotationCanvasRef.value.height);
+          // Use the stored effectiveDpi instead of recalculating
+          drawAnnotations(ctx, currentPage.value, currentEffectiveDpi.value);
+        }
+      }
+    }
+  );
+
   watch(canvasRef, (newCanvas) => {
     if (newCanvas && pdfDocument.value && currentPage.value === 0) {
       console.log("Canvas now available, displaying first page");
       displayPage(0);
     }
   });
-  
+
+  watch(
+    () => props.mouseLine,
+    (config) => {
+      setMouseLineOptions(toMouseLineOptions(config));
+    },
+    { deep: true }
+  );
+
+  // Watch for page changes (from prop or query param) and navigate to the specified page
+  watch(
+    effectivePage,
+    (newPage) => {
+      if (newPage !== undefined && pdfDocument.value) {
+        // Convert 1-based page number to 0-based index
+        const pageIndex = newPage - 1;
+        if (pageIndex >= 0 && pageIndex < totalPages.value) {
+          goToPage(pageIndex);
+        }
+      }
+    }
+  );
+
   onMounted(() => {
     console.log("Component mounted, canvas ref:", canvasRef.value);
+
+    // Navigate to initial page if specified (from prop or query param)
+    if (effectivePage.value !== undefined) {
+      nextTick(() => {
+        setTimeout(() => {
+          if (pdfDocument.value) {
+            const pageIndex = effectivePage.value! - 1;
+            if (pageIndex >= 0 && pageIndex < totalPages.value) {
+              goToPage(pageIndex);
+            }
+          }
+        }, 500);
+      });
+    }
   });
   
   onBeforeUnmount(() => {
@@ -185,6 +410,13 @@
     } catch (e) {
       console.error("Error during component cleanup:", e);
     }
+  });
+
+  // Expose methods and state to parent components
+  defineExpose({
+    currentPage,
+    refreshAnnotationsForPage,
+    goToPage
   });
   </script>
   

@@ -1,0 +1,104 @@
+<script setup lang="ts">
+import type { OverlayAnnotation } from '@/types/annotations';
+import type { MouseLineIntersectionContext } from '@/composables/useMouseGuide';
+
+definePageMeta({
+  middleware: [
+    (route) => {
+      if (!route.query.page) {
+        return navigateTo({ ...route, query: { ...route.query, page: '8' } });
+      }
+    }
+  ]
+});
+
+const { addLog } = useLog();
+const intersectingOverlays = ref<OverlayAnnotation[]>([]);
+const mouseLineY = ref<number | null>(null);
+const lastIntersectedIds = ref<string[]>([]);
+
+// Handle overlay click events - show IRI and semantic data
+const handleOverlayClick = (overlay: OverlayAnnotation) => {
+  const iri = overlay['@id'] || 'No IRI';
+  const row = overlay.semanticProperties?.rowIndex || 'Unknown';
+  const column = overlay.semanticProperties?.columnIndex || 'Unknown';
+  const confidence = overlay.semanticProperties?.confidence || 'Unknown';
+
+  addLog(`🔗 CELL CLICKED: "${overlay.content}"`);
+  addLog(`📋 IRI: ${iri}`);
+  addLog(`📍 Position: Row ${row}, Column ${column}`);
+  addLog(`🎯 Confidence: ${confidence}`);
+  addLog(`🏷️  Type: ${overlay['@type'] || 'Unknown'}`);
+  addLog(`📊 Full semantic data:`, overlay.semanticProperties);
+  addLog('─'.repeat(50));
+};
+
+// Handle canvas click events
+const handleCanvasClick = (context: { x: number, y: number, pageNumber: number }) => {
+  addLog(`Canvas clicked at (${context.x.toFixed(1)}, ${context.y.toFixed(1)})`);
+};
+
+const handleMouseLineIntersections = (context: MouseLineIntersectionContext) => {
+  if (context.orientation !== 'horizontal') {
+    return;
+  }
+
+  const ids = context.overlays.map(annotation => annotation['@id'] || `${annotation.page}-${annotation.line}`);
+  const hasChanged = ids.length !== lastIntersectedIds.value.length ||
+    ids.some((id, index) => id !== lastIntersectedIds.value[index]);
+
+  intersectingOverlays.value = context.overlays;
+  const normalizedY = Number.isFinite(context.y) ? context.y : null;
+  mouseLineY.value = normalizedY;
+
+  if (normalizedY === null) {
+    lastIntersectedIds.value = ids;
+    return;
+  }
+
+  if (hasChanged) {
+    lastIntersectedIds.value = ids;
+
+    if (ids.length) {
+      addLog(`📐 Line at y=${normalizedY.toFixed(1)} intersects ${ids.length} overlay(s)`);
+      context.overlays.forEach(annotation => addLog(`   • ${annotation.content}`));
+    } else {
+      addLog(`📐 Line at y=${normalizedY.toFixed(1)} intersects no overlays`);
+    }
+    addLog('─'.repeat(50));
+  }
+};
+
+</script>
+
+<template>
+  <TestPanel
+    heading="PDF 11 Horizontal Line Tooltips"
+    description="Inspect intersected annotations with on-canvas tooltips while scanning with a horizontal guide line."
+  >
+    <PDFViewer
+      file="/pdf-tests/pdf-01.pdf"
+      overlays="/pdf-tests/page-8-table-overlay-updated.jsonld"
+      @overlay-click="handleOverlayClick"
+      @canvas-click="handleCanvasClick"
+      :mouse-line="{ enabled: true, color: 'rgba(249, 115, 22, 0.8)', width: 2, tooltips: true, orientation: 'horizontal' }"
+      @mouse-line-intersections="handleMouseLineIntersections"
+    />
+    <div class="mt-4 space-y-2">
+      <p class="text-sm text-muted-foreground">
+        <template v-if="mouseLineY !== null">
+          Horizontal line at y={{ mouseLineY.toFixed(1) }} intersects {{ intersectingOverlays.length }} overlay(s).
+        </template>
+        <template v-else>
+          Move the mouse over the PDF to inspect overlays with the horizontal guide.
+        </template>
+      </p>
+      <ul v-if="intersectingOverlays.length" class="list-disc pl-5 text-sm leading-6">
+        <li v-for="overlay in intersectingOverlays" :key="overlay['@id'] || overlay.line">
+          {{ overlay.content }}
+        </li>
+      </ul>
+      <p v-else class="text-xs text-muted-foreground">No overlays intersect the current guide line.</p>
+    </div>
+  </TestPanel>
+</template>

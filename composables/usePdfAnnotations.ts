@@ -1,7 +1,11 @@
-import { ref, computed, type Ref } from 'vue';
+import { ref, computed, type Ref, unref } from 'vue';
 import html2canvas from 'html2canvas';
 import type { OverlayAnnotation } from '@/types/annotations';
 import { usePdfCoordinates } from './usePdfCoordinates';
+import { useAnnotationGeometry } from './useAnnotationGeometry';
+import type { AnnotationPathData, AnnotationSpatialIndex } from './useAnnotationGeometry';
+import { useAnnotationStyling } from './useAnnotationStyling';
+import { useWordConfidenceVisualization } from './useWordConfidenceVisualization';
 
 // Custom annotation provider interfaces
 export interface AnnotationRenderContext {
@@ -62,6 +66,14 @@ export type HtmlOverlayFunction = (
   context: AnnotationRenderContext
 ) => HtmlOverlayResult | null;
 
+export type AnnotationSource =
+  | string
+  | OverlayAnnotation[]
+  | {
+      url?: string | null;
+      data?: unknown;
+    };
+
 // Global singleton state
 const globalAnnotationProviders = ref<Map<string, AnnotationProvider>>(new Map());
 const globalActiveProviders = ref(new Set<string>(['default']));
@@ -82,12 +94,41 @@ export function usePdfAnnotations(
   canvasRef?: Ref<HTMLCanvasElement | null>,
   htmlOverlayContainer?: Ref<HTMLElement | null>,
   htmlAnnotation?: (context: AnnotationRenderContext, annotation: OverlayAnnotation) => string,
-  onOverlayClick?: (overlay: OverlayAnnotation, context: { x: number, y: number, pageNumber: number }) => void
+  onOverlayClick?: (overlay: OverlayAnnotation, context: { x: number, y: number, pageNumber: number }) => void,
+  overlayManagement?: {
+    createOverlayElement: () => HTMLElement;
+    addTrackedOverlay: (id: string, element: HTMLElement) => void;
+  },
+  highlightPredicate?: Ref<((annotation: OverlayAnnotation) => boolean) | undefined> | ((annotation: OverlayAnnotation) => boolean),
+  disableConfidenceColors?: Ref<boolean | undefined> | boolean
 ) {
+  // Get composable functions
+  const geometryComposable = useAnnotationGeometry();
+  const stylingComposable = useAnnotationStyling();
+  const wordConfidenceVisualization = useWordConfidenceVisualization();
+
+  const {
+    convertCoordinates,
+    createAnnotationPath,
+    buildSpatialIndex,
+    getAnnotationsIntersectingVerticalLine,
+    getAnnotationsIntersectingHorizontalLine,
+    getAnnotationsIntersectingVerticalLineOptimized,
+    getAnnotationsIntersectingHorizontalLineOptimized
+  } = geometryComposable;
+
+  const { getConfidenceColors } = stylingComposable;
+  const {
+    showWordConfidenceVisualization,
+    clearWordConfidenceVisualization,
+    hasWordLevelConfidence
+  } = wordConfidenceVisualization;
+
   // State
   const pageAnnotations = ref<OverlayAnnotation[]>([]);
   const selectedAnnotation = ref<OverlayAnnotation | null>(null);
-  const annotationPaths = ref(new Map<string, { path: Path2D, annotation: OverlayAnnotation }>());
+  const annotationPaths = ref(new Map<string, AnnotationPathData>());
+  const spatialIndex = ref<AnnotationSpatialIndex | null>(null);
   const showDialog = ref(false);
   
   // Use global singleton state
@@ -112,16 +153,480 @@ export function usePdfAnnotations(
     lineHeight: 1.2 // Line height multiplier
   });
 
-  // Load annotations from JSON file
-  const loadAnnotations = async (docId: string) => {
+  // Utility function to convert WKT POLYGON to legacy coordinate format
+  const convertWktToLegacyFormat = (wktString: string): string => {
+    if (!wktString) return '';
+
+    // Extract coordinates from WKT POLYGON format
+    // Input: "POLYGON((x1 y1, x2 y2, x3 y3, x4 y4, x1 y1))"
+    // Output: "x1,y1 x2,y2 x3,y3 x4,y4"
+
+    const polygonMatch = wktString.match(/POLYGON\s*\(\s*\((.*?)\)\s*\)/i);
+    if (!polygonMatch) return '';
+
+    const coordString = polygonMatch[1];
+    const coordPairs = coordString.split(',').map(pair => pair.trim());
+
+    // Remove the last coordinate pair if it's the same as the first (closing the polygon)
+    if (coordPairs.length > 4) {
+      const firstCoord = coordPairs[0].split(/\s+/);
+      const lastCoord = coordPairs[coordPairs.length - 1].split(/\s+/);
+
+      if (firstCoord.length === 2 && lastCoord.length === 2 &&
+          firstCoord[0] === lastCoord[0] && firstCoord[1] === lastCoord[1]) {
+        coordPairs.pop(); // Remove duplicate closing point
+      }
+    }
+
+    // Convert "x y" to "x,y" format
+    return coordPairs
+      .map(pair => pair.replace(/\s+/, ','))
+      .join(' ');
+  };
+
+  // Utility function to convert JSONLD geometry format to rect array
+  const convertJsonLDGeometry = (geometry: string): number[] => {
+    if (!geometry) return [];
+
+    // JSONLD geometry format: "x1,y1 x2,y2 x3,y3 x4,y4"
+    // Convert to rect format: [x1, y1, x2, y2, x3, y3, x4, y4]
+    const coordinates = geometry.trim().split(/\s+/);
+    const rect: number[] = [];
+
+    for (const coord of coordinates) {
+      const [x, y] = coord.split(',').map(Number);
+      if (!isNaN(x) && !isNaN(y)) {
+        rect.push(x, y);
+      }
+    }
+
+    return rect;
+  };
+
+  // Utility function to detect if data is JSONLD format
+  const isJsonLD = (data: any): boolean => {
+    if (!data || typeof data !== 'object') {
+      return false;
+    }
+    return data['@graph'] !== undefined || data['@context'] !== undefined;
+  };
+
+  // Transform JSONLD resources to OverlayAnnotation format
+  const transformJsonLDToOverlay = (data: any, defaultPage: string = "8"): OverlayAnnotation[] => {
+    if (!data['@graph'] || !Array.isArray(data['@graph'])) {
+      return [];
+    }
+
+    const graphItems: any[] = data['@graph'];
+
+    const keys = {
+      isPartOf: ['sdo:isPartOf', 'https://schema.org/isPartOf'],
+      hasGeometry: ['geo:hasGeometry', 'http://www.opengis.net/ont/geosparql#hasGeometry', 'geom:hasGeometry'],
+      asWkt: ['geo:asWKT', 'http://www.opengis.net/ont/geosparql#asWKT'],
+      content: ['di:content', 'doc:content', 'https://document-intelligence/ontology/content', 'content'],
+      confidence: ['di:confidence', 'doc:confidence', 'https://document-intelligence/ontology/confidence'],
+      rowIndex: ['di:rowIndex', 'https://document-intelligence/ontology/rowIndex'],
+      columnIndex: ['di:columnIndex', 'https://document-intelligence/ontology/columnIndex'],
+      kind: ['di:kind', 'https://document-intelligence/ontology/kind'],
+      lineNumber: ['di:lineNumber', 'https://document-intelligence/ontology/lineNumber'],
+      page: ['di:page', 'https://document-intelligence/ontology/page'],
+      confidenceSpans: ['di:confidenceSpans', 'https://document-intelligence/ontology/confidenceSpans'],
+      offset: ['di:offset', 'https://document-intelligence/ontology/offset'],
+      length: ['di:length', 'https://document-intelligence/ontology/length'],
+      state: ['di:state', 'https://document-intelligence/ontology/state']
+    } as const;
+
+    const getFirst = (item: any, candidates: readonly string[]) => {
+      if (!item || typeof item !== 'object') {
+        return undefined;
+      }
+      for (const candidate of candidates) {
+        if (item[candidate] !== undefined) {
+          return item[candidate];
+        }
+      }
+      return undefined;
+    };
+
+    const getLiteralValue = (value: any): any => {
+      if (value === null || value === undefined) {
+        return undefined;
+      }
+      if (Array.isArray(value)) {
+        if (!value.length) return undefined;
+        return getLiteralValue(value[0]);
+      }
+      if (typeof value === 'object') {
+        if (value['@value'] !== undefined) return value['@value'];
+        if (value['@id'] !== undefined) return value['@id'];
+      }
+      return value;
+    };
+
+    const getIdValue = (value: any): string | undefined => {
+      const raw = getLiteralValue(value);
+      return typeof raw === 'string' ? raw : undefined;
+    };
+
+    const getNumberValue = (value: any): number | undefined => {
+      const raw = getLiteralValue(value);
+      if (typeof raw === 'number') return Number.isFinite(raw) ? raw : undefined;
+      if (typeof raw === 'string') {
+        const parsed = Number(raw);
+        return Number.isFinite(parsed) ? parsed : undefined;
+      }
+      return undefined;
+    };
+
+    const toTypeArray = (value: any): string[] => {
+      if (Array.isArray(value)) {
+        return value.map((entry) => getIdValue(entry)).filter((entry): entry is string => !!entry);
+      }
+      const single = getIdValue(value);
+      return single ? [single] : [];
+    };
+
+    const getTypeLabel = (typeValues: string[]): string | undefined => {
+      const firstType = typeValues[0];
+      if (!firstType) return undefined;
+      const hashPos = firstType.lastIndexOf('#');
+      const slashPos = firstType.lastIndexOf('/');
+      const splitAt = Math.max(hashPos, slashPos);
+      return splitAt >= 0 ? firstType.slice(splitAt + 1) : firstType;
+    };
+
+    const matchesKnownType = (typeValue: string): boolean => {
+      return (
+        typeValue === 'di:Cell' ||
+        typeValue === 'doc:TableCell' ||
+        typeValue.endsWith('/Cell') ||
+        typeValue.endsWith('/Word') ||
+        typeValue.endsWith('/Line') ||
+        typeValue.endsWith('/Table') ||
+        typeValue.endsWith('/Figure') ||
+        typeValue.endsWith('/Paragraph') ||
+        typeValue.endsWith('/SelectionMark')
+      );
+    };
+
+    const pageByResource = new Map<string, string>();
+    const partOfByResource = new Map<string, string>();
+    const geometryMap = new Map<string, any>();
+    const confidenceSpanMap = new Map<string, any>();
+
+    graphItems.forEach((item: any) => {
+      const itemId = item?.['@id'];
+      if (!itemId || typeof itemId !== 'string') {
+        return;
+      }
+
+      const wktValue = getFirst(item, keys.asWkt);
+      if (wktValue !== undefined) {
+        geometryMap.set(itemId, wktValue);
+      }
+
+      const parentId = getIdValue(getFirst(item, keys.isPartOf));
+      if (parentId) {
+        partOfByResource.set(itemId, parentId);
+      }
+
+      const pageValue = getNumberValue(getFirst(item, keys.page));
+      if (pageValue !== undefined) {
+        pageByResource.set(itemId, Math.trunc(pageValue).toString());
+      } else {
+        const match = itemId.match(/\/page\/(\d+)(?:$|[/?#])/i);
+        if (match) {
+          pageByResource.set(itemId, match[1]);
+        }
+      }
+
+      if (
+        getFirst(item, keys.confidence) !== undefined ||
+        getFirst(item, keys.offset) !== undefined ||
+        getFirst(item, keys.length) !== undefined
+      ) {
+        confidenceSpanMap.set(itemId, item);
+      }
+    });
+
+    const resolvePage = (item: any): string => {
+      const directPage = getNumberValue(getFirst(item, keys.page));
+      if (directPage !== undefined) {
+        return Math.trunc(directPage).toString();
+      }
+
+      let current = item?.['@id'];
+      const visited = new Set<string>();
+      while (typeof current === 'string' && !visited.has(current)) {
+        visited.add(current);
+
+        const fromMap = pageByResource.get(current);
+        if (fromMap) {
+          return fromMap;
+        }
+
+        const pageMatch = current.match(/\/page\/(\d+)(?:$|[/?#])/i);
+        if (pageMatch) {
+          return pageMatch[1];
+        }
+
+        const annotationMatch = current.match(/\/annotation\/(\d+)-\d+(?:$|[/?#])/i);
+        if (annotationMatch) {
+          return annotationMatch[1];
+        }
+
+        current = partOfByResource.get(current);
+      }
+
+      return defaultPage;
+    };
+
+    const renderableItems = graphItems.filter((item: any) => {
+      const typeValues = toTypeArray(item['@type']);
+      const hasContent = getFirst(item, keys.content) !== undefined;
+      const hasGeometry = getFirst(item, keys.hasGeometry) !== undefined;
+      const isGeometryNode = getFirst(item, keys.asWkt) !== undefined;
+      const isPageNode = typeValues.some((typeValue) => typeValue.endsWith('/Page'));
+      const hasKnownType = typeValues.some(matchesKnownType);
+
+      if (isGeometryNode || isPageNode) {
+        return false;
+      }
+
+      return hasContent || hasGeometry || hasKnownType;
+    });
+
+    return renderableItems
+      .map((item: any, index: number) => {
+        const typeValues = toTypeArray(item['@type']);
+        const typeLabel = getTypeLabel(typeValues);
+        const rawContent = getLiteralValue(getFirst(item, keys.content));
+        const content = (typeof rawContent === 'string' ? rawContent : '').trim() || (typeLabel ?? '');
+
+        let geometry = '';
+        const geometryValue = getFirst(item, keys.hasGeometry);
+        if (geometryValue !== undefined) {
+          const directWkt = getFirst(geometryValue, keys.asWkt);
+          if (directWkt !== undefined) {
+            const wktString = getLiteralValue(directWkt);
+            if (typeof wktString === 'string') {
+              geometry = convertWktToLegacyFormat(wktString);
+            }
+          } else if (typeof geometryValue === 'string') {
+            if (geometryValue.trim().toUpperCase().startsWith('POLYGON')) {
+              geometry = convertWktToLegacyFormat(geometryValue);
+            } else {
+              geometry = geometryValue;
+            }
+          } else {
+            const geometryRef = getIdValue(geometryValue);
+            if (geometryRef && geometryMap.has(geometryRef)) {
+              const wktString = getLiteralValue(geometryMap.get(geometryRef));
+              if (typeof wktString === 'string') {
+                geometry = convertWktToLegacyFormat(wktString);
+              }
+            }
+          }
+        } else if (item['geometry']) {
+          geometry = item['geometry'];
+        }
+
+        const rect = convertJsonLDGeometry(geometry);
+        if (rect.length < 6) {
+          return null;
+        }
+
+        const semanticProperties: Record<string, any> = {};
+
+        const rowIndexValue = getLiteralValue(getFirst(item, keys.rowIndex));
+        if (rowIndexValue !== undefined) semanticProperties.rowIndex = rowIndexValue;
+
+        const columnIndexValue = getLiteralValue(getFirst(item, keys.columnIndex));
+        if (columnIndexValue !== undefined) semanticProperties.columnIndex = columnIndexValue;
+
+        const kindValue = getLiteralValue(getFirst(item, keys.kind));
+        if (kindValue !== undefined) semanticProperties.kind = kindValue;
+
+        const confidenceValue = getLiteralValue(getFirst(item, keys.confidence));
+        if (confidenceValue !== undefined) semanticProperties.confidence = confidenceValue;
+
+        const lineNumberValue = getLiteralValue(getFirst(item, keys.lineNumber));
+        if (lineNumberValue !== undefined) semanticProperties.lineNumber = lineNumberValue;
+
+        const stateValue = getLiteralValue(getFirst(item, keys.state));
+        if (stateValue !== undefined) semanticProperties.state = stateValue;
+
+        const isPartOfValue = getIdValue(getFirst(item, keys.isPartOf));
+        if (isPartOfValue !== undefined) semanticProperties.isPartOf = isPartOfValue;
+
+        const confidenceSpansData = getFirst(item, keys.confidenceSpans);
+        if (confidenceSpansData !== undefined) {
+          const spans = Array.isArray(confidenceSpansData) ? confidenceSpansData : [confidenceSpansData];
+          const confidenceValues: number[] = [];
+          const detailedSpans: Array<{ offset: number; length: number; confidence: number; text?: string }> = [];
+
+          spans.forEach((span: any) => {
+            const spanObject = span?.['@id'] ? confidenceSpanMap.get(span['@id']) : span;
+            if (!spanObject) return;
+
+            const confidence = getNumberValue(getFirst(spanObject, keys.confidence));
+            if (confidence !== undefined) {
+              confidenceValues.push(confidence);
+            }
+
+            const offset = getNumberValue(getFirst(spanObject, keys.offset));
+            const length = getNumberValue(getFirst(spanObject, keys.length));
+            if (offset !== undefined && length !== undefined && confidence !== undefined) {
+              detailedSpans.push({
+                offset: Math.trunc(offset),
+                length: Math.trunc(length),
+                confidence,
+                text: content.substring(Math.trunc(offset), Math.trunc(offset + length))
+              });
+            }
+          });
+
+          if (confidenceValues.length > 0) {
+            semanticProperties.confidence = confidenceValues[0];
+            semanticProperties.confidenceValues = confidenceValues;
+            semanticProperties.confidenceSpansCount = confidenceValues.length;
+          }
+          if (detailedSpans.length > 0) {
+            semanticProperties.confidenceSpans = detailedSpans.sort((a, b) => a.offset - b.offset);
+          }
+        }
+
+        return {
+          page: resolvePage(item),
+          line: index,
+          content,
+          rect,
+          '@id': item['@id'],
+          '@type': item['@type'],
+          '@context': data['@context'],
+          semanticProperties
+        } as OverlayAnnotation;
+      })
+      .filter((annotation): annotation is OverlayAnnotation => annotation !== null);
+  };
+
+  const resolveAnnotationData = async (source: AnnotationSource | null | undefined) => {
+    if (!source) {
+      return null;
+    }
+
     try {
-      const response = await fetch(docId);
-      const data = await response.json();
-      pageAnnotations.value = data?.overlay || [];
-      console.log('Loaded annotations:', pageAnnotations.value.length);
+      if (typeof source === 'string') {
+        if (!source) {
+          return null;
+        }
+
+        const response = await fetch(source);
+        if (!response.ok) {
+          throw new Error(`Failed to load annotations from ${source}: ${response.status}`);
+        }
+        return await response.json();
+      }
+
+      if (Array.isArray(source)) {
+        return source;
+      }
+
+      if (source.data !== undefined) {
+        return await Promise.resolve(source.data);
+      }
+
+      if (source.url) {
+        const response = await fetch(source.url);
+        if (!response.ok) {
+          throw new Error(`Failed to load annotations from ${source.url}: ${response.status}`);
+        }
+        return await response.json();
+      }
+
+      if (typeof source === 'object') {
+        return source;
+      }
+    } catch (error) {
+      console.error('[PDF Annotations] Error resolving annotation data:', error);
+      throw error;
+    }
+
+    return null;
+  };
+
+  const normalizeAnnotationPages = (annotations: OverlayAnnotation[], defaultPage?: number) => {
+    const fallback = defaultPage !== undefined ? defaultPage.toString() : undefined;
+
+    return annotations.map((annotation, index) => {
+      const pageValue = annotation.page ?? fallback;
+      const normalizedPage = (() => {
+        if (typeof pageValue === 'number') {
+          return pageValue.toString();
+        }
+        if (typeof pageValue === 'string') {
+          return pageValue;
+        }
+        return fallback ?? '';
+      })();
+
+      // Provide a stable line number if absent to retain overlay ordering
+      const normalizedLine =
+        annotation.line !== undefined ? annotation.line : index;
+
+      return {
+        ...annotation,
+        page: normalizedPage,
+        line: normalizedLine
+      } as OverlayAnnotation;
+    });
+  };
+
+  // Load annotations from JSON or JSONLD file
+  const loadAnnotations = async (
+    source: AnnotationSource | null | undefined,
+    options?: { defaultPage?: number }
+  ): Promise<OverlayAnnotation[]> => {
+    try {
+      const rawData = await resolveAnnotationData(source);
+
+      if (!rawData) {
+        console.warn('[PDF Annotations] No annotation data provided, clearing overlays');
+        pageAnnotations.value = [];
+        return [];
+      }
+
+      const data: any = rawData;
+
+      if (isJsonLD(data)) {
+        // Handle JSONLD format
+        pageAnnotations.value = transformJsonLDToOverlay(
+          data,
+          options?.defaultPage !== undefined ? options.defaultPage.toString() : undefined
+        );
+        console.log('Loaded JSONLD annotations:', pageAnnotations.value.length);
+        if (pageAnnotations.value.length) {
+          console.log('Sample annotation:', pageAnnotations.value[0]);
+        }
+      } else {
+        // Handle traditional JSON format
+        if (Array.isArray(data)) {
+          pageAnnotations.value = data;
+        } else {
+          pageAnnotations.value = data?.overlay || [];
+        }
+        console.log('Loaded JSON annotations:', pageAnnotations.value.length);
+      }
+
+      if (pageAnnotations.value.length) {
+        pageAnnotations.value = normalizeAnnotationPages(pageAnnotations.value, options?.defaultPage);
+      }
+
+      return pageAnnotations.value;
     } catch (error) {
       console.error('Error loading annotations:', error);
       pageAnnotations.value = [];
+      return [];
     }
   };
   
@@ -133,66 +638,123 @@ export function usePdfAnnotations(
 
   // Get annotations for a specific page
   const getAnnotationsForPage = (pageNumber: number) => {
-    return pageAnnotations.value.filter(
-      (annotation: OverlayAnnotation) => annotation.page === (pageNumber + 1).toString()
-    );
-  };
-
-  // Convert annotation coordinates to canvas coordinates
-  const convertCoordinates = (rect: number[], effectiveDpi: number) => {
-    const points: [number, number][] = [];
-    for (let i = 0; i < rect.length; i += 2) {
-      const x = rect[i] * effectiveDpi;
-      const y = rect[i + 1] * effectiveDpi;
-      points.push([x, y]);
-    }
-    return points;
-  };
-
-  // Create Path2D for annotation
-  const createAnnotationPath = (rect: number[], effectiveDpi: number): Path2D => {
-    const path = new Path2D();
-    const points = convertCoordinates(rect, effectiveDpi);
-    
-    for (let i = 0; i < points.length; i++) {
-      const [x, y] = points[i];
-      if (i === 0) {
-        path.moveTo(x, y);
-      } else {
-        path.lineTo(x, y);
+    const filtered = pageAnnotations.value.filter(
+      (annotation: OverlayAnnotation) => {
+        return annotation.page === (pageNumber + 1).toString();
       }
-    }
-    path.closePath();
-    return path;
+    );
+
+    return filtered;
   };
 
-  // Draw annotations on canvas
+  // Build spatial index for fast intersection queries
+  const buildAnnotationSpatialIndex = (canvasElement: HTMLCanvasElement | null) => {
+    if (!canvasElement || annotationPaths.value.size === 0) {
+      spatialIndex.value = null;
+      return;
+    }
+
+    const annotationPathArray = Array.from(annotationPaths.value.values());
+    spatialIndex.value = buildSpatialIndex(
+      annotationPathArray,
+      canvasElement.width,
+      canvasElement.height
+    );
+
+    console.debug('Built spatial index with', annotationPathArray.length, 'annotations');
+  };
+
+  // Virtual rendering helper - check if annotation is in viewport
+  const isAnnotationInViewport = (annotation: OverlayAnnotation, effectiveDpi: number, canvasElement: HTMLCanvasElement | null): boolean => {
+    if (!canvasElement || !annotation.rect || annotation.rect.length < 4) {
+      return true; // Render if we can't determine bounds
+    }
+
+    // Convert annotation coordinates to canvas coordinates
+    const points = convertCoordinates(annotation.rect, effectiveDpi);
+    if (points.length === 0) return true;
+
+    const xs = points.map(p => p[0]);
+    const ys = points.map(p => p[1]);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+
+    // Get current viewport bounds (considering canvas transform/zoom)
+    const viewportMinX = 0;
+    const viewportMaxX = canvasElement.width;
+    const viewportMinY = 0;
+    const viewportMaxY = canvasElement.height;
+
+    // Check if annotation bounds intersect with viewport
+    return !(maxX < viewportMinX || minX > viewportMaxX || maxY < viewportMinY || minY > viewportMaxY);
+  };
+
+  // Draw annotations on canvas with virtual rendering optimization
   const drawAnnotations = (
-    ctx: CanvasRenderingContext2D, 
-    pageNumber: number, 
+    ctx: CanvasRenderingContext2D,
+    pageNumber: number,
     effectiveDpi: number
   ) => {
     const currentPageAnnotations = getAnnotationsForPage(pageNumber);
-    
-    ctx.strokeStyle = 'red';
-    ctx.lineWidth = 2;
-    
-    // Clear existing paths
+
+    // Clear existing paths and spatial index
     annotationPaths.value.clear();
-    
+    spatialIndex.value = null;
+
+    // Performance optimization: Use virtual rendering for large datasets
+    const VIRTUAL_RENDERING_THRESHOLD = 50;
+    const useVirtualRendering = currentPageAnnotations.length > VIRTUAL_RENDERING_THRESHOLD;
+
+    let renderedCount = 0;
+    let culledCount = 0;
+
     for (const annotation of currentPageAnnotations) {
       const annotationId = `annotation-${annotation.page}-${annotation.line}`;
-      const path = createAnnotationPath(annotation.rect, effectiveDpi);
-      
+
+      // Virtual rendering: skip annotations outside viewport for large datasets
+      if (useVirtualRendering && !isAnnotationInViewport(annotation, effectiveDpi, canvasRef?.value || null)) {
+        culledCount++;
+        continue;
+      }
+
+      const pathData = createAnnotationPath(annotation, effectiveDpi);
+      if (!pathData) {
+        continue;
+      }
+      const { path } = pathData;
+
+      // Check if this annotation should be highlighted
+      // Use unref to handle both Refs and plain values
+      const currentHighlightPredicate = unref(highlightPredicate);
+      const shouldHighlight = currentHighlightPredicate ? currentHighlightPredicate(annotation) : false;
+      const { fill, stroke } = getConfidenceColors(annotation, {
+        highlight: shouldHighlight,
+        disableConfidenceColors: unref(disableConfidenceColors) ?? false
+      });
+
       // Draw the annotation
+      ctx.save();
       ctx.beginPath();
-      ctx.fillStyle = 'rgba(255, 0, 0, 0)';
+      ctx.fillStyle = fill;
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = 2;
       ctx.fill(path);
       ctx.stroke(path);
-      
+      ctx.restore();
+
       // Store path for hit testing
-      annotationPaths.value.set(annotationId, { path, annotation });
+      annotationPaths.value.set(annotationId, pathData);
+      renderedCount++;
     }
+
+    // Build spatial index after all paths are created
+    if (canvasRef?.value) {
+      buildAnnotationSpatialIndex(canvasRef.value);
+    }
+
+    // Rendering complete
   };
 
   // Check if point is inside any annotation
@@ -203,6 +765,47 @@ export function usePdfAnnotations(
       }
     }
     return null;
+  };
+
+  const findAnnotationsIntersectingVerticalLine = (x: number, ctx: CanvasRenderingContext2D) => {
+    console.log('[Intersection Debug] Vertical line at x:', x);
+    console.log('[Intersection Debug] AnnotationPaths available:', annotationPaths.value.size);
+    console.log('[Intersection Debug] Spatial index available:', spatialIndex.value ? 'yes' : 'no');
+
+    let result;
+    // Use optimized spatial index if available
+    if (spatialIndex.value && canvasRef?.value) {
+      console.log('[Intersection Debug] Using spatial index');
+      result = getAnnotationsIntersectingVerticalLineOptimized(
+        spatialIndex.value,
+        x,
+        0, // y is not used for vertical line lookup in spatial grid
+        canvasRef.value.height,
+        ctx
+      );
+    } else {
+      console.log('[Intersection Debug] Using fallback method');
+      result = getAnnotationsIntersectingVerticalLine(annotationPaths.value.values(), x, ctx);
+    }
+
+    console.log('[Intersection Debug] Found', result.length, 'intersecting annotations');
+    return result;
+  };
+
+  const findAnnotationsIntersectingHorizontalLine = (y: number, ctx: CanvasRenderingContext2D) => {
+    // Use optimized spatial index if available
+    if (spatialIndex.value && canvasRef?.value) {
+      return getAnnotationsIntersectingHorizontalLineOptimized(
+        spatialIndex.value,
+        0, // x is not used for horizontal line lookup in spatial grid
+        y,
+        canvasRef.value.width,
+        ctx
+      );
+    }
+
+    // Fallback to original method
+    return getAnnotationsIntersectingHorizontalLine(annotationPaths.value.values(), y, ctx);
   };
 
   // Handle annotation click (legacy - kept for backward compatibility)
@@ -427,7 +1030,10 @@ export function usePdfAnnotations(
     if (htmlAnnotation && canvasRef?.value && htmlOverlayContainer?.value) {
       try {
         console.log('[Simple HTML Render] Creating overlay for:', annotation.content);
-        
+        console.log('[Simple HTML Render] Canvas element:', canvasRef.value);
+        console.log('[Simple HTML Render] Overlay container:', htmlOverlayContainer.value);
+        console.log('[Simple HTML Render] Annotation rect:', annotation.rect);
+
         // Check if overlay already exists for this annotation
         const annotationId = `${annotation.page}-${annotation.line}`;
         const existingOverlay = htmlOverlayContainer.value.querySelector(`[data-annotation-id="${annotationId}"]`);
@@ -438,13 +1044,15 @@ export function usePdfAnnotations(
         
         // Generate HTML using the provided function
         const htmlContent = htmlAnnotation(context, annotation);
-        
-        // Create overlay element
-        const overlay = document.createElement('div');
+        console.log('[Simple HTML Render] Generated HTML content:', htmlContent);
+
+        // Create overlay element using optimized system
+        const overlay = overlayManagement?.createOverlayElement() || document.createElement('div');
         overlay.innerHTML = htmlContent;
         overlay.className = 'pdf-simple-html-overlay';
         overlay.setAttribute('data-annotation-id', annotationId);
-        
+        console.log('[Simple HTML Render] Created overlay element:', overlay);
+
         // Position overlay using coordinate conversion
         const screenCoords = convertPdfCoordsToOverlayCoords(
           annotation,
@@ -452,6 +1060,7 @@ export function usePdfAnnotations(
           canvasRef.value,
           { minX, minY, width, height }
         );
+        console.log('[Simple HTML Render] Screen coordinates:', screenCoords);
         
         if (screenCoords) {
           // Calculate scaled font size based on zoom level
@@ -459,6 +1068,11 @@ export function usePdfAnnotations(
           const canvasActualWidth = canvasRef.value.width;
           const scaleRatio = canvasBounds.width / canvasActualWidth;
           const scaledFontSize = Math.max(8, Math.min(16, 12 * scaleRatio)); // Min 8px, max 16px
+
+          console.log('[Simple HTML Render] Canvas bounds:', canvasBounds);
+          console.log('[Simple HTML Render] Canvas actual width:', canvasActualWidth);
+          console.log('[Simple HTML Render] Scale ratio:', scaleRatio);
+          console.log('[Simple HTML Render] Scaled font size:', scaledFontSize);
           
           // Create a temporary element to measure the actual HTML content size
           const tempMeasure = document.createElement('div');
@@ -482,7 +1096,12 @@ export function usePdfAnnotations(
           const centerY = screenCoords.y + (screenCoords.height / 2);
           const overlayLeft = centerX - (naturalWidth / 2);
           const overlayTop = centerY - (naturalHeight / 2);
-          
+
+          console.log('[Simple HTML Render] Positioning calculations:');
+          console.log('  - Center X:', centerX, 'Center Y:', centerY);
+          console.log('  - Natural size:', naturalWidth, 'x', naturalHeight);
+          console.log('  - Final position:', overlayLeft, ',', overlayTop);
+
           overlay.style.position = 'absolute';
           overlay.style.left = `${overlayLeft}px`;
           overlay.style.top = `${overlayTop}px`;
@@ -493,6 +1112,10 @@ export function usePdfAnnotations(
           overlay.style.fontSize = `${scaledFontSize}px`;
           overlay.style.fontFamily = 'Arial, sans-serif';
           overlay.style.boxSizing = 'border-box';
+          overlay.style.backgroundColor = 'rgba(255, 255, 0, 0.8)'; // Add visible background for debugging
+          overlay.style.border = '2px solid red'; // Add visible border for debugging
+
+          console.log('[Simple HTML Render] Applied styles:', overlay.style.cssText);
           
           // Add click handler that calls the overlay click callback directly
           overlay.addEventListener('click', (event) => {
@@ -523,10 +1146,20 @@ export function usePdfAnnotations(
           });
           
           htmlOverlayContainer.value.appendChild(overlay);
-          console.log('[Simple HTML Render] Overlay created and positioned:');
-          console.log('  - PDF rect center:', centerX.toFixed(1), ',', centerY.toFixed(1));
-          console.log('  - Overlay position:', overlayLeft.toFixed(1), ',', overlayTop.toFixed(1));
-          console.log('  - Natural size:', naturalWidth, 'x', naturalHeight, 'Scaled font size:', scaledFontSize);
+
+          // Track the overlay in the optimized management system
+          if (overlayManagement?.addTrackedOverlay) {
+            overlayManagement.addTrackedOverlay(annotationId, overlay);
+          }
+
+          console.debug('[Simple HTML Render] Overlay created and positioned:', {
+            annotationId,
+            centerX: centerX.toFixed(1),
+            centerY: centerY.toFixed(1),
+            position: [overlayLeft.toFixed(1), overlayTop.toFixed(1)],
+            size: [naturalWidth, naturalHeight],
+            scaledFontSize
+          });
           
           // Skip provider-based rendering - HTML overlay IS the visual representation
           return;
@@ -724,6 +1357,44 @@ export function usePdfAnnotations(
     annotationProviders.value.set('default', defaultProvider);
   }
 
+  // Helper function to trigger word-level confidence visualization
+  const triggerWordConfidenceVisualization = (
+    annotation: OverlayAnnotation,
+    path: Path2D,
+    canvas: HTMLCanvasElement,
+    effectiveDpi: number
+  ) => {
+    // Calculate the annotation bounds in canvas coordinates
+    const points = convertCoordinates(annotation.rect, effectiveDpi);
+
+    if (points.length === 0) return;
+
+    const xs = points.map(p => p[0]);
+    const ys = points.map(p => p[1]);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+
+    // Convert canvas coordinates to overlay coordinates
+    // The HTML overlay container is positioned at (0,0) relative to the canvas
+    const canvasRect = canvas.getBoundingClientRect();
+    const scaleX = canvasRect.width / canvas.width;
+    const scaleY = canvasRect.height / canvas.height;
+
+    const screenRect = {
+      left: minX * scaleX,
+      top: minY * scaleY,
+      width: (maxX - minX) * scaleX,
+      height: (maxY - minY) * scaleY
+    };
+
+    // Show word confidence visualization in HTML overlay
+    if (htmlOverlayContainer.value) {
+      showWordConfidenceVisualization(annotation, htmlOverlayContainer.value, screenRect);
+    }
+  };
+
   // Draw hover effect
   const drawHoverEffect = async (ctx: CanvasRenderingContext2D, x: number, y: number, effectiveDpi: number) => {
     const annotation = getAnnotationAtPoint(x, y, ctx);
@@ -732,19 +1403,27 @@ export function usePdfAnnotations(
       const { path } = annotationPaths.value.get(annotationId) || { path: null };
       
       if (path) {
+        const { fill, stroke } = getConfidenceColors(annotation, { highlight: true });
+
         ctx.save();
-        ctx.fillStyle = 'rgba(255, 0, 0, 0.2)';
-        ctx.fill(path);
-        ctx.strokeStyle = 'red';
+        ctx.fillStyle = fill;
+        ctx.strokeStyle = stroke;
         ctx.lineWidth = 2;
+        ctx.fill(path);
         ctx.stroke(path);
         ctx.restore();
         
-        // Draw annotation text - always try to draw, regardless of orientation
-        try {
-          await drawAnnotationText(ctx, annotation, effectiveDpi);
-        } catch (error) {
-          console.warn('Error drawing annotation text:', error);
+        // Check if we have word-level confidence data
+        if (hasWordLevelConfidence(annotation)) {
+          // Trigger word-level confidence visualization in HTML overlay
+          triggerWordConfidenceVisualization(annotation, path, ctx.canvas, effectiveDpi);
+        } else {
+          // Draw annotation text - always try to draw, regardless of orientation
+          try {
+            await drawAnnotationText(ctx, annotation, effectiveDpi);
+          } catch (error) {
+            console.warn('Error drawing annotation text:', error);
+          }
         }
       }
     }
@@ -753,6 +1432,7 @@ export function usePdfAnnotations(
   // Clear all annotations
   const clearAnnotations = () => {
     annotationPaths.value.clear();
+    spatialIndex.value = null;
     selectedAnnotation.value = null;
     showDialog.value = false;
   };
@@ -907,10 +1587,10 @@ export function usePdfAnnotations(
     loadAnnotations,
     initializePdfCoordinates,
     getAnnotationsForPage,
-    convertCoordinates,
-    createAnnotationPath,
     drawAnnotations,
     getAnnotationAtPoint,
+    getAnnotationsIntersectingVerticalLine: findAnnotationsIntersectingVerticalLine,
+    getAnnotationsIntersectingHorizontalLine: findAnnotationsIntersectingHorizontalLine,
     handleAnnotationClick,
     showAnnotationDialog,
     handleAnnotationHover,
@@ -946,7 +1626,11 @@ export function usePdfAnnotations(
     
     // Debug utilities
     disableFallbackRendering,
-    
+
+    // Word Confidence Visualization
+    clearWordConfidenceVisualization,
+    hasWordLevelConfidence,
+
     // Test function for coordinate debugging
     testCoordinateConversion: pdfCoords.testCoordinateConversion
   };
