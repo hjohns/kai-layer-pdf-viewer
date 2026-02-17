@@ -205,159 +205,310 @@ export function usePdfAnnotations(
 
   // Utility function to detect if data is JSONLD format
   const isJsonLD = (data: any): boolean => {
+    if (!data || typeof data !== 'object') {
+      return false;
+    }
     return data['@graph'] !== undefined || data['@context'] !== undefined;
   };
 
-  // Transform JSONLD table cells to OverlayAnnotation format
+  // Transform JSONLD resources to OverlayAnnotation format
   const transformJsonLDToOverlay = (data: any, defaultPage: string = "8"): OverlayAnnotation[] => {
     if (!data['@graph'] || !Array.isArray(data['@graph'])) {
       return [];
     }
 
-    // Create a lookup map for geometry objects by their @id
+    const graphItems: any[] = data['@graph'];
+
+    const keys = {
+      isPartOf: ['sdo:isPartOf', 'https://schema.org/isPartOf'],
+      hasGeometry: ['geo:hasGeometry', 'http://www.opengis.net/ont/geosparql#hasGeometry', 'geom:hasGeometry'],
+      asWkt: ['geo:asWKT', 'http://www.opengis.net/ont/geosparql#asWKT'],
+      content: ['di:content', 'doc:content', 'https://document-intelligence/ontology/content', 'content'],
+      confidence: ['di:confidence', 'doc:confidence', 'https://document-intelligence/ontology/confidence'],
+      rowIndex: ['di:rowIndex', 'https://document-intelligence/ontology/rowIndex'],
+      columnIndex: ['di:columnIndex', 'https://document-intelligence/ontology/columnIndex'],
+      kind: ['di:kind', 'https://document-intelligence/ontology/kind'],
+      lineNumber: ['di:lineNumber', 'https://document-intelligence/ontology/lineNumber'],
+      page: ['di:page', 'https://document-intelligence/ontology/page'],
+      confidenceSpans: ['di:confidenceSpans', 'https://document-intelligence/ontology/confidenceSpans'],
+      offset: ['di:offset', 'https://document-intelligence/ontology/offset'],
+      length: ['di:length', 'https://document-intelligence/ontology/length'],
+      state: ['di:state', 'https://document-intelligence/ontology/state']
+    } as const;
+
+    const getFirst = (item: any, candidates: readonly string[]) => {
+      if (!item || typeof item !== 'object') {
+        return undefined;
+      }
+      for (const candidate of candidates) {
+        if (item[candidate] !== undefined) {
+          return item[candidate];
+        }
+      }
+      return undefined;
+    };
+
+    const getLiteralValue = (value: any): any => {
+      if (value === null || value === undefined) {
+        return undefined;
+      }
+      if (Array.isArray(value)) {
+        if (!value.length) return undefined;
+        return getLiteralValue(value[0]);
+      }
+      if (typeof value === 'object') {
+        if (value['@value'] !== undefined) return value['@value'];
+        if (value['@id'] !== undefined) return value['@id'];
+      }
+      return value;
+    };
+
+    const getIdValue = (value: any): string | undefined => {
+      const raw = getLiteralValue(value);
+      return typeof raw === 'string' ? raw : undefined;
+    };
+
+    const getNumberValue = (value: any): number | undefined => {
+      const raw = getLiteralValue(value);
+      if (typeof raw === 'number') return Number.isFinite(raw) ? raw : undefined;
+      if (typeof raw === 'string') {
+        const parsed = Number(raw);
+        return Number.isFinite(parsed) ? parsed : undefined;
+      }
+      return undefined;
+    };
+
+    const toTypeArray = (value: any): string[] => {
+      if (Array.isArray(value)) {
+        return value.map((entry) => getIdValue(entry)).filter((entry): entry is string => !!entry);
+      }
+      const single = getIdValue(value);
+      return single ? [single] : [];
+    };
+
+    const getTypeLabel = (typeValues: string[]): string | undefined => {
+      const firstType = typeValues[0];
+      if (!firstType) return undefined;
+      const hashPos = firstType.lastIndexOf('#');
+      const slashPos = firstType.lastIndexOf('/');
+      const splitAt = Math.max(hashPos, slashPos);
+      return splitAt >= 0 ? firstType.slice(splitAt + 1) : firstType;
+    };
+
+    const matchesKnownType = (typeValue: string): boolean => {
+      return (
+        typeValue === 'di:Cell' ||
+        typeValue === 'doc:TableCell' ||
+        typeValue.endsWith('/Cell') ||
+        typeValue.endsWith('/Word') ||
+        typeValue.endsWith('/Line') ||
+        typeValue.endsWith('/Table') ||
+        typeValue.endsWith('/Figure') ||
+        typeValue.endsWith('/Paragraph') ||
+        typeValue.endsWith('/SelectionMark')
+      );
+    };
+
+    const pageByResource = new Map<string, string>();
+    const partOfByResource = new Map<string, string>();
     const geometryMap = new Map<string, any>();
-    // Create a lookup map for confidence span objects by their @id
     const confidenceSpanMap = new Map<string, any>();
 
-    data['@graph'].forEach((item: any) => {
-      if (item['geo:asWKT']) {
-        geometryMap.set(item['@id'], item);
+    graphItems.forEach((item: any) => {
+      const itemId = item?.['@id'];
+      if (!itemId || typeof itemId !== 'string') {
+        return;
       }
-      if (item['di:confidence'] || item['di:offset'] || item['di:length']) {
-        confidenceSpanMap.set(item['@id'], item);
+
+      const wktValue = getFirst(item, keys.asWkt);
+      if (wktValue !== undefined) {
+        geometryMap.set(itemId, wktValue);
+      }
+
+      const parentId = getIdValue(getFirst(item, keys.isPartOf));
+      if (parentId) {
+        partOfByResource.set(itemId, parentId);
+      }
+
+      const pageValue = getNumberValue(getFirst(item, keys.page));
+      if (pageValue !== undefined) {
+        pageByResource.set(itemId, Math.trunc(pageValue).toString());
+      } else {
+        const match = itemId.match(/\/page\/(\d+)(?:$|[/?#])/i);
+        if (match) {
+          pageByResource.set(itemId, match[1]);
+        }
+      }
+
+      if (
+        getFirst(item, keys.confidence) !== undefined ||
+        getFirst(item, keys.offset) !== undefined ||
+        getFirst(item, keys.length) !== undefined
+      ) {
+        confidenceSpanMap.set(itemId, item);
       }
     });
 
-    // Filter and process only cell objects (not geometry objects)
-    const cellItems = data['@graph'].filter((item: any) =>
-      item['@type'] === 'di:Cell' || item['@type'] === 'doc:TableCell' || item['di:content'] || item['doc:content']
-    );
-
-    return cellItems.map((item: any, index: number) => {
-      // Extract basic properties - support both old (doc:) and new (di:) formats
-      const content = item['di:content'] || item['doc:content'] || item.content || '';
-
-      // Extract geometry - support old geom:hasGeometry and new geo:hasGeometry/geo:asWKT formats
-      let geometry = '';
-      if (item['geo:hasGeometry']) {
-        if (item['geo:hasGeometry']['geo:asWKT']) {
-          // Direct WKT format
-          const wktString = item['geo:hasGeometry']['geo:asWKT']['@value'] || item['geo:hasGeometry']['geo:asWKT'];
-          geometry = convertWktToLegacyFormat(wktString);
-        } else if (item['geo:hasGeometry']['@id']) {
-          // Reference to geometry object by @id
-          const geometryRef = item['geo:hasGeometry']['@id'];
-          const geometryObj = geometryMap.get(geometryRef);
-          if (geometryObj && geometryObj['geo:asWKT']) {
-            const wktString = geometryObj['geo:asWKT']['@value'] || geometryObj['geo:asWKT'];
-            geometry = convertWktToLegacyFormat(wktString);
-          }
-        }
-      } else if (item['geom:hasGeometry']) {
-        // Old format
-        geometry = item['geom:hasGeometry'];
-      } else if (item.geometry) {
-        // Fallback
-        geometry = item.geometry;
+    const resolvePage = (item: any): string => {
+      const directPage = getNumberValue(getFirst(item, keys.page));
+      if (directPage !== undefined) {
+        return Math.trunc(directPage).toString();
       }
 
-      const rect = convertJsonLDGeometry(geometry);
+      let current = item?.['@id'];
+      const visited = new Set<string>();
+      while (typeof current === 'string' && !visited.has(current)) {
+        visited.add(current);
 
-      // Extract semantic properties - support both old and new formats
-      const semanticProperties: Record<string, any> = {};
+        const fromMap = pageByResource.get(current);
+        if (fromMap) {
+          return fromMap;
+        }
 
-      // New format (di: namespace)
-      if (item['di:rowIndex']) semanticProperties.rowIndex = item['di:rowIndex']['@value'] || item['di:rowIndex'];
-      if (item['di:columnIndex']) semanticProperties.columnIndex = item['di:columnIndex']['@value'] || item['di:columnIndex'];
-      if (item['di:kind']) semanticProperties.kind = item['di:kind']['@id'] || item['di:kind'];
+        const pageMatch = current.match(/\/page\/(\d+)(?:$|[/?#])/i);
+        if (pageMatch) {
+          return pageMatch[1];
+        }
 
-      // Handle confidence spans in new format
-      if (item['di:confidenceSpans']) {
-        const confidenceSpansData = item['di:confidenceSpans'];
+        const annotationMatch = current.match(/\/annotation\/(\d+)-\d+(?:$|[/?#])/i);
+        if (annotationMatch) {
+          return annotationMatch[1];
+        }
 
-        // Handle both single span and array of spans
-        const spans = Array.isArray(confidenceSpansData) ? confidenceSpansData : [confidenceSpansData];
+        current = partOfByResource.get(current);
+      }
 
-        // Extract confidence values from all spans
-        const confidenceValues: number[] = [];
-        spans.forEach((span: any) => {
-          if (span['@id']) {
-            // Reference to confidence span object
-            const confidenceSpanObj = confidenceSpanMap.get(span['@id']);
-            if (confidenceSpanObj && confidenceSpanObj['di:confidence']) {
-              const confValue = confidenceSpanObj['di:confidence']['@value'] || confidenceSpanObj['di:confidence'];
-              if (typeof confValue === 'number' || typeof confValue === 'string') {
-                confidenceValues.push(typeof confValue === 'string' ? parseFloat(confValue) : confValue);
-              }
+      return defaultPage;
+    };
+
+    const renderableItems = graphItems.filter((item: any) => {
+      const typeValues = toTypeArray(item['@type']);
+      const hasContent = getFirst(item, keys.content) !== undefined;
+      const hasGeometry = getFirst(item, keys.hasGeometry) !== undefined;
+      const isGeometryNode = getFirst(item, keys.asWkt) !== undefined;
+      const isPageNode = typeValues.some((typeValue) => typeValue.endsWith('/Page'));
+      const hasKnownType = typeValues.some(matchesKnownType);
+
+      if (isGeometryNode || isPageNode) {
+        return false;
+      }
+
+      return hasContent || hasGeometry || hasKnownType;
+    });
+
+    return renderableItems
+      .map((item: any, index: number) => {
+        const typeValues = toTypeArray(item['@type']);
+        const typeLabel = getTypeLabel(typeValues);
+        const rawContent = getLiteralValue(getFirst(item, keys.content));
+        const content = (typeof rawContent === 'string' ? rawContent : '').trim() || (typeLabel ?? '');
+
+        let geometry = '';
+        const geometryValue = getFirst(item, keys.hasGeometry);
+        if (geometryValue !== undefined) {
+          const directWkt = getFirst(geometryValue, keys.asWkt);
+          if (directWkt !== undefined) {
+            const wktString = getLiteralValue(directWkt);
+            if (typeof wktString === 'string') {
+              geometry = convertWktToLegacyFormat(wktString);
             }
-          } else if (span['di:confidence']) {
-            // Direct confidence value (fallback for other formats)
-            const confValue = span['di:confidence']['@value'] || span['di:confidence'];
-            if (typeof confValue === 'number' || typeof confValue === 'string') {
-              confidenceValues.push(typeof confValue === 'string' ? parseFloat(confValue) : confValue);
+          } else if (typeof geometryValue === 'string') {
+            if (geometryValue.trim().toUpperCase().startsWith('POLYGON')) {
+              geometry = convertWktToLegacyFormat(geometryValue);
+            } else {
+              geometry = geometryValue;
+            }
+          } else {
+            const geometryRef = getIdValue(geometryValue);
+            if (geometryRef && geometryMap.has(geometryRef)) {
+              const wktString = getLiteralValue(geometryMap.get(geometryRef));
+              if (typeof wktString === 'string') {
+                geometry = convertWktToLegacyFormat(wktString);
+              }
             }
           }
-        });
+        } else if (item['geometry']) {
+          geometry = item['geometry'];
+        }
 
-        // Store confidence data
-        if (confidenceValues.length > 0) {
-          // For backward compatibility, store the first/average confidence as the main confidence
-          semanticProperties.confidence = confidenceValues[0];
-          // Also store all confidence values for advanced use cases
-          semanticProperties.confidenceValues = confidenceValues;
-          semanticProperties.confidenceSpansCount = confidenceValues.length;
+        const rect = convertJsonLDGeometry(geometry);
+        if (rect.length < 6) {
+          return null;
+        }
 
-          // Store detailed span information for word-level visualization
-          const detailedSpans: Array<{
-            offset: number;
-            length: number;
-            confidence: number;
-            text?: string;
-          }> = [];
+        const semanticProperties: Record<string, any> = {};
+
+        const rowIndexValue = getLiteralValue(getFirst(item, keys.rowIndex));
+        if (rowIndexValue !== undefined) semanticProperties.rowIndex = rowIndexValue;
+
+        const columnIndexValue = getLiteralValue(getFirst(item, keys.columnIndex));
+        if (columnIndexValue !== undefined) semanticProperties.columnIndex = columnIndexValue;
+
+        const kindValue = getLiteralValue(getFirst(item, keys.kind));
+        if (kindValue !== undefined) semanticProperties.kind = kindValue;
+
+        const confidenceValue = getLiteralValue(getFirst(item, keys.confidence));
+        if (confidenceValue !== undefined) semanticProperties.confidence = confidenceValue;
+
+        const lineNumberValue = getLiteralValue(getFirst(item, keys.lineNumber));
+        if (lineNumberValue !== undefined) semanticProperties.lineNumber = lineNumberValue;
+
+        const stateValue = getLiteralValue(getFirst(item, keys.state));
+        if (stateValue !== undefined) semanticProperties.state = stateValue;
+
+        const isPartOfValue = getIdValue(getFirst(item, keys.isPartOf));
+        if (isPartOfValue !== undefined) semanticProperties.isPartOf = isPartOfValue;
+
+        const confidenceSpansData = getFirst(item, keys.confidenceSpans);
+        if (confidenceSpansData !== undefined) {
+          const spans = Array.isArray(confidenceSpansData) ? confidenceSpansData : [confidenceSpansData];
+          const confidenceValues: number[] = [];
+          const detailedSpans: Array<{ offset: number; length: number; confidence: number; text?: string }> = [];
 
           spans.forEach((span: any) => {
-            if (span['@id']) {
-              const confidenceSpanObj = confidenceSpanMap.get(span['@id']);
-              if (confidenceSpanObj) {
-                const offset = parseInt(confidenceSpanObj['di:offset']?.['@value'] || confidenceSpanObj['di:offset'] || 0);
-                const length = parseInt(confidenceSpanObj['di:length']?.['@value'] || confidenceSpanObj['di:length'] || 0);
-                const confidence = parseFloat(confidenceSpanObj['di:confidence']?.['@value'] || confidenceSpanObj['di:confidence'] || 0);
+            const spanObject = span?.['@id'] ? confidenceSpanMap.get(span['@id']) : span;
+            if (!spanObject) return;
 
-                if (!isNaN(offset) && !isNaN(length) && !isNaN(confidence)) {
-                  // Extract the text for this span
-                  const text = content.substring(offset, offset + length);
-                  detailedSpans.push({ offset, length, confidence, text });
-                }
-              }
+            const confidence = getNumberValue(getFirst(spanObject, keys.confidence));
+            if (confidence !== undefined) {
+              confidenceValues.push(confidence);
+            }
+
+            const offset = getNumberValue(getFirst(spanObject, keys.offset));
+            const length = getNumberValue(getFirst(spanObject, keys.length));
+            if (offset !== undefined && length !== undefined && confidence !== undefined) {
+              detailedSpans.push({
+                offset: Math.trunc(offset),
+                length: Math.trunc(length),
+                confidence,
+                text: content.substring(Math.trunc(offset), Math.trunc(offset + length))
+              });
             }
           });
 
-          semanticProperties.confidenceSpans = detailedSpans.sort((a, b) => a.offset - b.offset);
+          if (confidenceValues.length > 0) {
+            semanticProperties.confidence = confidenceValues[0];
+            semanticProperties.confidenceValues = confidenceValues;
+            semanticProperties.confidenceSpansCount = confidenceValues.length;
+          }
+          if (detailedSpans.length > 0) {
+            semanticProperties.confidenceSpans = detailedSpans.sort((a, b) => a.offset - b.offset);
+          }
         }
-      }
 
-      // Old format (doc: namespace) - keep for backward compatibility
-      if (item['doc:row']) semanticProperties.row = item['doc:row']['@value'] || item['doc:row'];
-      if (item['doc:column']) semanticProperties.column = item['doc:column']['@value'] || item['doc:column'];
-      if (item['doc:confidence']) semanticProperties.confidence = item['doc:confidence']['@value'] || item['doc:confidence'];
-
-      if (item['sdo:isPartOf']) semanticProperties.isPartOf = item['sdo:isPartOf']['@id'] || item['sdo:isPartOf'];
-
-      // Create OverlayAnnotation
-      const annotation: OverlayAnnotation = {
-        page: defaultPage,
-        line: index,
-        content,
-        rect,
-        '@id': item['@id'],
-        '@type': item['@type'],
-        '@context': data['@context'],
-        semanticProperties
+        return {
+          page: resolvePage(item),
+          line: index,
+          content,
+          rect,
+          '@id': item['@id'],
+          '@type': item['@type'],
+          '@context': data['@context'],
+          semanticProperties
+        } as OverlayAnnotation;
+      })
+      .filter((annotation): annotation is OverlayAnnotation => annotation !== null);
   };
-
-  return annotation;
-});
-};
 
   const resolveAnnotationData = async (source: AnnotationSource | null | undefined) => {
     if (!source) {
